@@ -1,103 +1,141 @@
-# Shanghai Maximum Temperature Oracle
+# Shanghai Temperature Oracle
 
 **English** | [简体中文](README.zh-CN.md)
 
-See [DEPLOY_UBUNTU.md](DEPLOY_UBUNTU.md) for Ubuntu deployment instructions.
+A quantitative decision system for Shanghai maximum-temperature prediction markets. It combines archived weather-model calibration, live multi-model forecasts, executable Polymarket order-book depth, layered risk filters, Telegram alerts, and point-in-time trade backtesting.
 
-This is a dependency-free, auditable system for forecasting Shanghai's next-day maximum temperature, combining weather probabilities with live Polymarket order-book data, and delivering risk-filtered signals through Telegram. It never places real orders automatically.
+> Research software only. It does not place orders automatically, and forecast edge is not guaranteed profit.
 
-## Weather Underground / ZSPD Backtest
+## Strategy at a Glance
 
-```bash
-python3 wu_backtest.py download --start-year 2015
-python3 wu_backtest.py backtest --start-year 2020
+```mermaid
+flowchart LR
+    A["ZSPD observations"] --> D["Bias & probability calibration"]
+    B["ECMWF · GFS · CMA · JMA"] --> D
+    C["Weather features<br/>dew point · cloud · radiation · rain · wind"] --> D
+    D --> E["Integer temperature distribution"]
+    F["Polymarket order book<br/>bid · ask · depth"] --> G["Executable basket cost"]
+    E --> H["Signal engine"]
+    G --> H
+    H --> I{"All risk gates pass?"}
+    I -- Yes --> J["Telegram bet plan<br/>+ simulated paper trade"]
+    I -- No --> K["No-opportunity status"]
+    J --> L["Settlement & rolling backtest"]
 ```
 
-Data is stored in `data/wu_zspd_daily_c.csv`; reports and daily predictions are written to `outputs/`. The integer-bin model uses nested walk-forward validation and reports accuracy, log loss, and multiclass Brier score.
+The forecast target and settlement reference are Shanghai Pudong International Airport (ZSPD). The model produces probabilities for integer temperature bins rather than relying only on a single point forecast.
 
-## Archived Numerical Weather Prediction Backtest
+## Signal Decision Funnel
 
-```bash
-python3 nwp_backtest.py download --start 2024-01-01
-python3 nwp_backtest.py backtest
-python3 enhanced_nwp.py download --start 2024-01-01
-python3 enhanced_nwp.py backtest
+A two-bin or three-bin adjacent basket is eligible only when every gate passes:
+
+```mermaid
+flowchart TD
+    A["Adjacent temperature basket"] --> B{"Contains modal bin?"}
+    B -- No --> X["Reject"]
+    B -- Yes --> C{"Supported by ≥3 raw models?"}
+    C -- No --> X
+    C -- Yes --> D{"Every executable leg ≥1¢?"}
+    D -- No --> X
+    D -- Yes --> E{"Probability threshold passed?"}
+    E -- No --> X
+    E -- Yes --> F{"Probability − executable cost<br/>passes edge threshold?"}
+    F -- No --> X
+    F -- Yes --> G{"Capital and exposure available?"}
+    G -- No --> X
+    G -- Yes --> H["Telegram signal"]
 ```
 
-The system uses fixed D+1/D+2 archived forecasts from the Open-Meteo Previous Runs API. It compares GFS, ECMWF, CMA, JMA, and a rolling bias-corrected ensemble. The enhanced model adds dew point, cloud cover, shortwave radiation, precipitation, wind vectors, and heat interactions.
-
-## Quick Start
-
-```bash
-python3 app.py update --start 2010-01-01
-python3 app.py backtest --start-year 2018 --threshold 35
-python3 app.py forecast --threshold 35
-python3 polymarket_analysis.py
-```
-
-## Backtest Definition
-
-- Target: predict next-day maximum temperature using only information available before the target day.
-- Split: expanding-window daily backtest with no random shuffling.
-- Baselines: previous-day persistence and seasonal climatology.
-- Metrics: MAE, RMSE, bias, ±2°C accuracy, integer-bin accuracy, Brier score, and log loss.
-
-## Telegram Polymarket Signals
-
-The monitor automatically selects the next-day market in the Asia/Shanghai timezone and scans adjacent two-bin and three-bin baskets. A formal betting signal must satisfy every rule:
-
-- combined model probability of at least 50%;
-- includes the model's highest-probability temperature bin;
-- supported by at least three raw weather models;
-- every executable leg is priced at 1¢ or higher;
-- model probability minus executable basket cost is at least 10%;
-- cumulative exposure for one daily contract does not exceed 20% of current equity.
-
-Historical bias correction is capped at ±1°C relative to the current raw multi-model center. Equal-share orders are evaluated against actual order-book depth. The system does not place orders.
-
-Setup:
-
-1. Create a Telegram bot with `@BotFather` and obtain a token.
-2. Copy `telegram.env.example` to `work/telegram.env`, then enter the token and chat ID.
-3. Run a read-only check:
-
-```bash
-python3 telegram_polymarket_monitor.py --dry-run
-```
-
-Run the live notifier:
-
-```bash
-python3 telegram_polymarket_monitor.py --env-file work/telegram.env
-```
-
-Opportunity alerts include order legs, limits, capital allocation, and maximum loss. When no opportunity qualifies, a status notification is sent at most once every six hours. Duplicate signals are suppressed.
-
-## Capital Management
-
-The default starting bankroll is USD 10:
-
-- settled P&L changes equity;
-- unresolved paper positions reserve cash;
-- exposure per daily contract is capped at 20% of equity;
-- the default target is ten shares per leg and is reduced when the budget is insufficient;
-- a signal is rejected if it cannot satisfy the minimum five-share order.
-
-## Point-in-Time Snapshots and Trade-Level Rolling Backtest
-
-Every live monitoring run stores the model state, probabilities, per-bin quotes, full ask depth, candidates, and filter decisions in `work/polymarket_snapshots.sqlite3`.
-
-Each successfully delivered formal Telegram betting alert is recorded as a simulated trade. No-opportunity notifications are not trades. After settlement, the system calculates hit rate, P&L, equity, and maximum drawdown.
-
-```bash
-python3 polymarket_trade_backtest.py all \
-  --db work/polymarket_snapshots.sqlite3 --bankroll 10
-```
-
-Reports are written to `outputs/polymarket_trade_backtest.json` and `outputs/polymarket_trade_backtest_trades.csv`.
-
-The Ubuntu deployment captures snapshots every 30 minutes and refreshes resolutions and the rolling backtest daily at 18:10.
+Historical bias correction is capped at ±1°C relative to the current raw multi-model center. Order cost is calculated by walking live ask depth for equal shares in every selected bin.
 
 ## Time-to-Close Layers
 
-The production cycle monitors both today's and tomorrow's contracts. Remaining time is calculated from Polymarket's official event `endDate` and assigned to a 24h, 12h, 6h, or 3h layer. Default probability/edge thresholds are 50%/10%, 52%/8%, 55%/6%, and 60%/5%, respectively. The rolling report publishes hit rate, P&L, and average entry edge separately for every layer.
+The production monitor follows both today's and tomorrow's markets. Remaining time comes from Polymarket's official event end time.
+
+| Layer | Minimum basket probability | Minimum model edge |
+|---|---:|---:|
+| 24h | 50% | 10% |
+| 12h | 52% | 8% |
+| 6h | 55% | 6% |
+| 3h | 60% | 5% |
+
+Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
+
+## Capital and Execution Policy
+
+```mermaid
+flowchart LR
+    A["Starting equity<br/>$10"] --> B["Add settled P&L"]
+    B --> C["Subtract cash reserved<br/>by open paper positions"]
+    C --> D["Available cash"]
+    D --> E["Max 20% equity<br/>per daily contract"]
+    E --> F["Target 10 equal shares"]
+    F --> G{"Budget sufficient?"}
+    G -- Yes --> H["Record only after<br/>Telegram delivery succeeds"]
+    G -- No --> I["Reduce shares<br/>minimum 5"]
+```
+
+The paper ledger treats every successfully delivered formal Telegram bet alert as one simulated trade. No-opportunity notices are not trades. Fees are excluded from the signal rule and current P&L report, so reported returns may overstate realizable returns.
+
+## Weather Backtest Results
+
+All weather results use walk-forward evaluation rather than random train/test shuffling.
+
+### Enhanced archived D+1 model
+
+Period: 2025-01-19 to 2026-08-12, 571 observations.
+
+| Model | MAE | RMSE | Exact integer | Adjacent integer |
+|---|---:|---:|---:|---:|
+| Enhanced weather features | 0.862°C | 1.150°C | 38.0% | 82.8% |
+| Online meta strategy | **0.856°C** | **1.143°C** | 38.7% | 82.5% |
+| Discrete bin strategy | **0.837°C** | 1.194°C | **38.9%** | 82.5% |
+| Previous temperature-only ensemble | 0.995°C | 1.281°C | 32.0% | 78.5% |
+
+On actual hot days at or above 30°C, the enhanced model achieved 0.843°C MAE and 41.9% exact-integer accuracy over 160 observations.
+
+### Archived multi-model ensemble
+
+D+1 period: 2024-04-05 to 2026-08-12, 860 observations.
+
+| Forecast | MAE | RMSE | Bias | Exact integer |
+|---|---:|---:|---:|---:|
+| Rolling calibrated ensemble | **0.977°C** | **1.277°C** | -0.038°C | **33.1%** |
+| Raw equal-weight ensemble | 1.800°C | 2.163°C | -1.669°C | 14.4% |
+| GFS | 1.431°C | 1.806°C | -1.090°C | 21.0% |
+| ECMWF | 1.524°C | 1.876°C | -1.278°C | 16.7% |
+
+These figures evaluate temperature forecasting, not trading profitability.
+
+## Live Trade Backtest Status
+
+The live database stores immutable model state, quotes, full ask depth, candidate baskets, filter decisions, Telegram deliveries, and settlement results.
+
+| Metric | Current status |
+|---|---:|
+| Point-in-time snapshot runs | 6 |
+| Stored outcome rows | 66 |
+| Tracked unresolved contracts | 2 |
+| Formal paper-trade alerts | 0 |
+| Resolved paper trades | 0 |
+
+The trade sample is not yet large enough to estimate hit rate, return, or drawdown. No trading-performance claim should be made until a meaningful number of alerts have settled. The report will later break down hit rate, P&L, and average entry edge across the 24h/12h/6h/3h layers.
+
+## Backtest Integrity
+
+```mermaid
+sequenceDiagram
+    participant W as Weather models
+    participant P as Polymarket
+    participant S as Snapshot DB
+    participant T as Telegram
+    participant R as Resolution
+    W->>S: Forecast available at that time
+    P->>S: Executable order-book depth
+    S->>T: Formal signal if every gate passes
+    T->>S: Successful delivery becomes paper trade
+    R->>S: Winning integer bin
+    S->>S: P&L, equity, drawdown, layer statistics
+```
+
+Historical quotes are never replaced with final prices. This prevents look-ahead leakage in the trade-level rolling backtest.
