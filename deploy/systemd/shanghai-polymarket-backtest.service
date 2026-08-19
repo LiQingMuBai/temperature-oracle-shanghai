@@ -1,0 +1,17 @@
+[Unit]
+Description=Resolve Shanghai Polymarket contracts and refresh rolling backtest
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=shanghaiwx
+Group=shanghaiwx
+WorkingDirectory=/usr/unitree
+ExecStart=/usr/bin/python3 /usr/unitree/polymarket_trade_backtest.py all --db /usr/unitree/work/polymarket_snapshots.sqlite3 --bankroll 10
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/usr/unitree/work /usr/unitree/outputs

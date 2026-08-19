@@ -1,0 +1,20 @@
+[Unit]
+Description=Shanghai temperature Polymarket monitor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=shanghaiwx
+Group=shanghaiwx
+WorkingDirectory=/usr/unitree
+ExecStart=/usr/bin/python3 /usr/unitree/telegram_polymarket_monitor.py --env-file /usr/unitree/work/telegram.env
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/usr/unitree/work /usr/unitree/outputs
+
+[Install]
+WantedBy=multi-user.target

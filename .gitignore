@@ -1,0 +1,11 @@
+work/telegram.env
+work/telegram_monitor_state.json
+work/*.sqlite3
+work/*.sqlite3-wal
+work/*.sqlite3-shm
+__pycache__/
+*.pyc
+.DS_Store
+outputs/
+data/
+work_wu*.html

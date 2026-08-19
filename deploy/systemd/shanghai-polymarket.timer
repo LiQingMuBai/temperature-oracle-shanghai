@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Shanghai Polymarket monitor every 30 minutes
+
+[Timer]
+OnCalendar=*-*-* *:00,30:00
+Persistent=true
+RandomizedDelaySec=20
+Unit=shanghai-polymarket.service
+
+[Install]
+WantedBy=timers.target

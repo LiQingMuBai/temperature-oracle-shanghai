@@ -1,0 +1,152 @@
+#!/usr/bin/env python3
+"""SQLite persistence for point-in-time Polymarket/model snapshots."""
+import json
+import sqlite3
+from pathlib import Path
+
+
+SCHEMA = """
+PRAGMA journal_mode=WAL;
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY,
+  captured_at TEXT NOT NULL,
+  contract_date TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  raw_weather_center_c REAL,
+  weather_center_c REAL,
+  weather_sigma_c REAL,
+  model_forecasts_json TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  UNIQUE(captured_at, slug)
+);
+CREATE INDEX IF NOT EXISTS idx_runs_slug_time ON runs(slug, captured_at);
+CREATE TABLE IF NOT EXISTS outcomes (
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  outcome TEXT NOT NULL,
+  weather_prob REAL NOT NULL,
+  market_prob REAL,
+  best_bid REAL,
+  best_ask REAL,
+  bid_size REAL,
+  ask_size REAL,
+  ask_levels_json TEXT NOT NULL,
+  PRIMARY KEY(run_id, outcome)
+);
+CREATE TABLE IF NOT EXISTS candidates (
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+  rank_no INTEGER NOT NULL,
+  outcomes_json TEXT NOT NULL,
+  legs_json TEXT NOT NULL,
+  model_probability REAL NOT NULL,
+  executable_cost REAL NOT NULL,
+  net_edge REAL NOT NULL,
+  qualifies INTEGER NOT NULL,
+  contains_model_mode INTEGER NOT NULL,
+  model_support_count INTEGER NOT NULL,
+  minimum_leg_price REAL NOT NULL,
+  shares_per_outcome REAL NOT NULL,
+  PRIMARY KEY(run_id, rank_no)
+);
+CREATE INDEX IF NOT EXISTS idx_candidates_qualified ON candidates(qualifies, run_id);
+CREATE TABLE IF NOT EXISTS resolutions (
+  slug TEXT PRIMARY KEY,
+  contract_date TEXT NOT NULL,
+  winning_outcome TEXT NOT NULL,
+  resolved_at TEXT NOT NULL,
+  source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_trades (
+  id INTEGER PRIMARY KEY,
+  run_id INTEGER NOT NULL UNIQUE REFERENCES runs(id) ON DELETE RESTRICT,
+  notified_at TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  contract_date TEXT NOT NULL,
+  outcomes_json TEXT NOT NULL,
+  legs_json TEXT NOT NULL,
+  model_probability REAL NOT NULL,
+  executable_cost REAL NOT NULL,
+  net_edge REAL NOT NULL,
+  shares_per_outcome REAL NOT NULL,
+  stake_usd REAL NOT NULL,
+  bankroll_at_signal_usd REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_slug ON paper_trades(slug, notified_at);
+"""
+
+
+def connect(path):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(str(path), timeout=30)
+    db.execute("PRAGMA foreign_keys=ON")
+    db.executescript(SCHEMA)
+    return db
+
+
+def save_snapshot(path, analysis, ranked, config):
+    with connect(path) as db:
+        cur = db.execute(
+            """INSERT OR IGNORE INTO runs
+               (captured_at,contract_date,slug,raw_weather_center_c,weather_center_c,
+                weather_sigma_c,model_forecasts_json,config_json)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (analysis["as_of"], analysis["contract_date"], analysis["slug"],
+             analysis.get("raw_weather_center_c"), analysis.get("weather_center_c"),
+             analysis.get("weather_sigma_c"), json.dumps(analysis.get("model_forecasts_c", {})),
+             json.dumps(config)),
+        )
+        run_id = cur.lastrowid
+        if not run_id:
+            run_id = db.execute("SELECT id FROM runs WHERE captured_at=? AND slug=?",
+                                (analysis["as_of"], analysis["slug"])).fetchone()[0]
+        for row in analysis["ranking"]:
+            db.execute("""INSERT OR REPLACE INTO outcomes VALUES (?,?,?,?,?,?,?,?,?)""", (
+                run_id, row["outcome"], row["weather_prob"], row.get("market_prob"),
+                row.get("best_bid"), row.get("best_ask"), row.get("bid_size"), row.get("ask_size"),
+                json.dumps(row.get("ask_levels", []))))
+        for rank_no, item in enumerate(ranked, 1):
+            db.execute("""INSERT OR REPLACE INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                run_id, rank_no, json.dumps(item["outcomes"], ensure_ascii=False),
+                json.dumps(item["legs"], ensure_ascii=False), item["model_probability"],
+                item["buy_cost_per_complete_basket"], item["net_edge"], int(item["qualifies"]),
+                int(item["contains_model_mode"]), item["model_support_count"],
+                item["minimum_leg_price"], item["shares_per_outcome"]))
+        return run_id
+
+
+def record_paper_trade(path, run_id, analysis, item, bankroll):
+    """Persist one simulated entry only after the formal Telegram alert succeeded."""
+    shares = float(item["shares_per_outcome"])
+    cost = float(item["buy_cost_per_complete_basket"])
+    with connect(path) as db:
+        db.execute("""INSERT OR IGNORE INTO paper_trades
+          (run_id,notified_at,slug,contract_date,outcomes_json,legs_json,model_probability,
+           executable_cost,net_edge,shares_per_outcome,stake_usd,bankroll_at_signal_usd)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            run_id, analysis["as_of"], analysis["slug"], analysis["contract_date"],
+            json.dumps(item["outcomes"], ensure_ascii=False),
+            json.dumps(item["legs"], ensure_ascii=False), item["model_probability"], cost,
+            item["net_edge"], shares, cost * shares, bankroll))
+
+
+def portfolio_state(path, starting_bankroll, current_slug):
+    """Cash ledger using settled P&L and cost reserved by unresolved paper positions."""
+    with connect(path) as db:
+        rows = db.execute("""SELECT p.slug,p.outcomes_json,p.shares_per_outcome,p.stake_usd,
+                                    z.winning_outcome
+          FROM paper_trades p LEFT JOIN resolutions z ON z.slug=p.slug""").fetchall()
+    settled_pnl = 0.0
+    open_stake = 0.0
+    current_contract_stake = 0.0
+    for slug, outcomes_json, shares, stake, winner in rows:
+        if winner is None:
+            open_stake += stake
+            if slug == current_slug:
+                current_contract_stake += stake
+        else:
+            settled_pnl += (shares if winner in json.loads(outcomes_json) else 0.0) - stake
+    equity = float(starting_bankroll) + settled_pnl
+    return {"starting_bankroll_usd": float(starting_bankroll), "settled_pnl_usd": settled_pnl,
+            "equity_usd": equity, "open_stake_usd": open_stake,
+            "available_cash_usd": max(0.0, equity - open_stake),
+            "current_contract_open_stake_usd": current_contract_stake}
