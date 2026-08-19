@@ -13,6 +13,7 @@ import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from polymarket_snapshot_db import portfolio_state, record_paper_trade, save_snapshot
+from zspd_observations import current_day_max
 
 ROOT = Path(__file__).resolve().parent
 def load_env(path):
@@ -68,6 +69,25 @@ def outcome_for_temperature(labels, value):
         if "below" not in label and "higher" not in label and integer == boundary:
             return label
     return None
+
+
+def condition_on_observed_max(analysis, observed_max_c):
+    """Condition final daily maximum probabilities on Tmax already observed today."""
+    for row in analysis["ranking"]:
+        label = row["outcome"]
+        boundary = temperature_key(label)
+        impossible = ("below" in label and boundary < observed_max_c) or (
+            "below" not in label and "higher" not in label and boundary < observed_max_c)
+        if impossible:
+            row["weather_prob"] = 0.0
+    total = sum(float(row["weather_prob"]) for row in analysis["ranking"])
+    if total > 0:
+        for row in analysis["ranking"]:
+            row["weather_prob"] = float(row["weather_prob"]) / total
+    analysis["unconditioned_model_forecasts_c"] = dict(analysis.get("model_forecasts_c", {}))
+    analysis["model_forecasts_c"] = {
+        name: max(float(value), observed_max_c)
+        for name, value in analysis.get("model_forecasts_c", {}).items()}
 
 
 def fill_cost(levels, shares):
@@ -174,9 +194,13 @@ def format_alert(analysis, item):
     remaining_cash = max(0, available_before - total_cash)
     gross_payout = item["shares_per_outcome"]
     profit_if_hit = gross_payout - total_cash
+    observation = analysis.get("current_day_observation")
+    observation_line = (f"今日ZSPD已观测最高温：{observation['max_temp_c']:.1f}°C\n"
+                        if observation and observation.get("applied") else "")
     return (
         "上海最高温组合出现量化信号\n"
         f"日期：{analysis['contract_date']}\n"
+        f"{observation_line}"
         f"组合：{labels}\n"
         f"模型组合概率：{item['model_probability']:.1%}\n"
         f"可成交买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
@@ -219,9 +243,13 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
             f"模型概率：{item['model_probability']:.1%}；买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
             f"未通过：{'；'.join(reasons) if reasons else '稳健性规则'}"
         )
+    observation = analysis.get("current_day_observation")
+    observation_line = (f"今日ZSPD已观测最高温：{observation['max_temp_c']:.1f}°C\n"
+                        if observation and observation.get("applied") else "")
     return (
         "上海最高温监控：当前没有下注机会\n"
         f"日期：{analysis['contract_date']}\n"
+        f"{observation_line}"
         f"{detail}\n"
         f"https://polymarket.com/event/{analysis['slug']}\n"
         "系统将继续每30分钟检查。"
@@ -253,6 +281,17 @@ def main():
     if hours_to_close <= 0:
         print(json.dumps({"slug": slug, "status": "market close time passed"}, ensure_ascii=False))
         return
+    today = dt.datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+    if target == today and lead_bucket in ("6h", "3h"):
+        try:
+            observation = current_day_max(target)
+        except Exception as exc:
+            observation = {"error": type(exc).__name__, "applied": False}
+        if observation:
+            observation["applied"] = observation.get("age_hours", 99) <= 2
+            analysis["current_day_observation"] = observation
+            if observation["applied"]:
+                condition_on_observed_max(analysis, observation["max_temp_c"])
     layer_defaults = {"24h": (0.50, 0.10), "12h": (0.52, 0.08),
                       "6h": (0.55, 0.06), "3h": (0.60, 0.05)}
     default_probability, default_edge = layer_defaults[lead_bucket]
@@ -303,6 +342,7 @@ def main():
         "bankroll_usd": bankroll, "maximum_contract_exposure": max_contract_fraction,
         "minimum_order_shares": minimum_order_shares, "portfolio": portfolio,
         "hours_to_close": hours_to_close, "lead_bucket": lead_bucket,
+        "current_day_observation": analysis.get("current_day_observation"),
     })
 
     state_path = ROOT / "work" / f"telegram_monitor_state_{target}.json"

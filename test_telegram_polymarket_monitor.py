@@ -1,8 +1,16 @@
 import unittest
-from telegram_polymarket_monitor import candidates, execution_limit, fill_cost, format_alert
+from telegram_polymarket_monitor import candidates, condition_on_observed_max, execution_limit, fill_cost, format_alert
 
 
 class MonitorTests(unittest.TestCase):
+    def test_current_day_max_conditions_distribution(self):
+        analysis={"model_forecasts_c":{"a":29,"b":32},"ranking":[
+            {"outcome":"29°C","weather_prob":.3},{"outcome":"30°C","weather_prob":.2},
+            {"outcome":"31°C","weather_prob":.3},{"outcome":"32°C","weather_prob":.2}]}
+        condition_on_observed_max(analysis,31)
+        self.assertEqual(analysis["ranking"][0]["weather_prob"],0)
+        self.assertAlmostEqual(analysis["ranking"][2]["weather_prob"],.6)
+        self.assertEqual(analysis["model_forecasts_c"]["a"],31)
     def test_fill_cost_includes_depth(self):
         cost = fill_cost([{"price": .2, "size": 5}, {"price": .3, "size": 5}], 10)
         self.assertAlmostEqual(cost, 2.5)

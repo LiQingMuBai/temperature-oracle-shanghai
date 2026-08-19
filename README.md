@@ -61,6 +61,8 @@ The production monitor follows both today's and tomorrow's markets. Remaining ti
 
 Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
 
+For today's 6h and 3h layers, fresh ZSPD METAR observations condition the distribution on the maximum temperature already observed. Bins below the observed maximum become impossible. Observations older than two hours are recorded but never used for trading decisions.
+
 ## Capital and Execution Policy
 
 ```mermaid
