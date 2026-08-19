@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS runs (
   weather_sigma_c REAL,
   model_forecasts_json TEXT NOT NULL,
   config_json TEXT NOT NULL,
+  hours_to_close REAL,
+  lead_bucket TEXT,
   UNIQUE(captured_at, slug)
 );
 CREATE INDEX IF NOT EXISTS idx_runs_slug_time ON runs(slug, captured_at);
@@ -68,7 +70,9 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   net_edge REAL NOT NULL,
   shares_per_outcome REAL NOT NULL,
   stake_usd REAL NOT NULL,
-  bankroll_at_signal_usd REAL NOT NULL
+  bankroll_at_signal_usd REAL NOT NULL,
+  hours_to_close REAL,
+  lead_bucket TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_slug ON paper_trades(slug, notified_at);
 """
@@ -80,6 +84,15 @@ def connect(path):
     db = sqlite3.connect(str(path), timeout=30)
     db.execute("PRAGMA foreign_keys=ON")
     db.executescript(SCHEMA)
+    # Forward-only lightweight migrations for databases created by earlier releases.
+    for table, columns in {
+        "runs": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
+        "paper_trades": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
+    }.items():
+        existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+        for name, kind in columns:
+            if name not in existing:
+                db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
     return db
 
 
@@ -88,12 +101,12 @@ def save_snapshot(path, analysis, ranked, config):
         cur = db.execute(
             """INSERT OR IGNORE INTO runs
                (captured_at,contract_date,slug,raw_weather_center_c,weather_center_c,
-                weather_sigma_c,model_forecasts_json,config_json)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                weather_sigma_c,model_forecasts_json,config_json,hours_to_close,lead_bucket)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (analysis["as_of"], analysis["contract_date"], analysis["slug"],
              analysis.get("raw_weather_center_c"), analysis.get("weather_center_c"),
              analysis.get("weather_sigma_c"), json.dumps(analysis.get("model_forecasts_c", {})),
-             json.dumps(config)),
+             json.dumps(config), config.get("hours_to_close"), config.get("lead_bucket")),
         )
         run_id = cur.lastrowid
         if not run_id:
@@ -114,19 +127,20 @@ def save_snapshot(path, analysis, ranked, config):
         return run_id
 
 
-def record_paper_trade(path, run_id, analysis, item, bankroll):
+def record_paper_trade(path, run_id, analysis, item, bankroll, hours_to_close=None, lead_bucket=None):
     """Persist one simulated entry only after the formal Telegram alert succeeded."""
     shares = float(item["shares_per_outcome"])
     cost = float(item["buy_cost_per_complete_basket"])
     with connect(path) as db:
         db.execute("""INSERT OR IGNORE INTO paper_trades
           (run_id,notified_at,slug,contract_date,outcomes_json,legs_json,model_probability,
-           executable_cost,net_edge,shares_per_outcome,stake_usd,bankroll_at_signal_usd)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+           executable_cost,net_edge,shares_per_outcome,stake_usd,bankroll_at_signal_usd,
+           hours_to_close,lead_bucket)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
             run_id, analysis["as_of"], analysis["slug"], analysis["contract_date"],
             json.dumps(item["outcomes"], ensure_ascii=False),
             json.dumps(item["legs"], ensure_ascii=False), item["model_probability"], cost,
-            item["net_edge"], shares, cost * shares, bankroll))
+            item["net_edge"], shares, cost * shares, bankroll, hours_to_close, lead_bucket))
 
 
 def portfolio_state(path, starting_bankroll, current_slug):

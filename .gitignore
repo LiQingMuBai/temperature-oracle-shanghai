@@ -1,5 +1,6 @@
 work/telegram.env
 work/telegram_monitor_state.json
+work/telegram_monitor_state_*.json
 work/*.sqlite3
 work/*.sqlite3-wal
 work/*.sqlite3-shm

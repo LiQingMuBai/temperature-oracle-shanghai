@@ -97,3 +97,7 @@ python3 polymarket_trade_backtest.py all \
 报告写入 `outputs/polymarket_trade_backtest.json` 和 `outputs/polymarket_trade_backtest_trades.csv`。
 
 Ubuntu服务器默认每30分钟采集一次快照，每天18:10更新结算和滚动回测。
+
+## 距离结算时间分层
+
+生产任务同时监控今日和次日合约，依据Polymarket官方事件 `endDate` 计算剩余时间，划分为24h、12h、6h和3h档。默认“最低概率/最低优势”分别为50%/10%、52%/8%、55%/6%和60%/5%。滚动报告会分别统计各档的命中率、盈亏和平均入场优势。

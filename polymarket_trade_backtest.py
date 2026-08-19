@@ -63,20 +63,30 @@ def build_report(db_path, starting_bankroll=10.0):
             LEFT JOIN resolutions z ON z.slug=r.slug WHERE z.slug IS NULL""").fetchone()[0]
         rows = db.execute("""
           SELECT p.slug,p.contract_date,p.notified_at,p.outcomes_json,p.model_probability,
-                 p.executable_cost,p.net_edge,p.shares_per_outcome,z.winning_outcome
+                 p.executable_cost,p.net_edge,p.shares_per_outcome,z.winning_outcome,
+                 p.hours_to_close,COALESCE(p.lead_bucket,'unknown')
           FROM paper_trades p JOIN resolutions z ON z.slug=p.slug
           ORDER BY p.contract_date,p.notified_at
         """).fetchall()
     trades=[]; equity=starting_bankroll; peak=equity; max_drawdown=0.0
-    for slug,date,captured,outcomes_json,prob,cost,edge,shares,winner in rows:
+    for slug,date,captured,outcomes_json,prob,cost,edge,shares,winner,hours_to_close,lead_bucket in rows:
         outcomes=json.loads(outcomes_json); stake=cost*shares; hit=winner in outcomes
         payout=shares if hit else 0.0; pnl=payout-stake; equity+=pnl; peak=max(peak,equity)
         max_drawdown=max(max_drawdown,(peak-equity)/peak if peak else 0)
         trades.append({"contract_date":date,"slug":slug,"entry_at":captured,
             "outcomes":" + ".join(outcomes),"model_probability":prob,"entry_cost":cost,
             "net_edge":edge,"stake_usd":stake,"winning_outcome":winner,"hit":hit,
-            "pnl_usd":pnl,"equity_usd":equity})
+            "pnl_usd":pnl,"equity_usd":equity,"hours_to_close":hours_to_close,
+            "lead_bucket":lead_bucket})
     wins=sum(t["hit"] for t in trades); total_pnl=sum(t["pnl_usd"] for t in trades)
+    lead_time_performance={}
+    for bucket in ("24h","12h","6h","3h","unknown"):
+        group=[t for t in trades if t["lead_bucket"]==bucket]
+        if group:
+            lead_time_performance[bucket]={"trades":len(group),"wins":sum(t["hit"] for t in group),
+                "hit_rate":sum(t["hit"] for t in group)/len(group),
+                "pnl_usd":sum(t["pnl_usd"] for t in group),
+                "average_edge":sum(t["net_edge"] for t in group)/len(group)}
     report={"generated_at":dt.datetime.now().astimezone().isoformat(),
         "method":"every successfully delivered formal Telegram bet alert is one simulated entry; fees excluded",
         "snapshot_runs":snapshot_count,"outcome_rows":outcome_count,"unresolved_contracts":open_contracts,
@@ -85,7 +95,8 @@ def build_report(db_path, starting_bankroll=10.0):
         "hit_rate":wins/len(trades) if trades else None,"starting_bankroll_usd":starting_bankroll,
         "ending_equity_usd":equity,"total_pnl_usd":total_pnl,
         "return_pct":total_pnl/starting_bankroll if starting_bankroll else None,
-        "maximum_drawdown_pct":max_drawdown,"trades":trades}
+        "maximum_drawdown_pct":max_drawdown,"lead_time_performance":lead_time_performance,
+        "trades":trades}
     return report
 
 
@@ -93,7 +104,8 @@ def write_report(report, output_json, output_csv):
     output_json.parent.mkdir(parents=True, exist_ok=True)
     output_json.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     fields=["contract_date","slug","entry_at","outcomes","model_probability","entry_cost",
-            "net_edge","stake_usd","winning_outcome","hit","pnl_usd","equity_usd"]
+            "net_edge","stake_usd","winning_outcome","hit","pnl_usd","equity_usd",
+            "hours_to_close","lead_bucket"]
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer=csv.DictWriter(f,fieldnames=fields);writer.writeheader();writer.writerows(report["trades"])
 

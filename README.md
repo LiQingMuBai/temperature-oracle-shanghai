@@ -97,3 +97,7 @@ python3 polymarket_trade_backtest.py all \
 Reports are written to `outputs/polymarket_trade_backtest.json` and `outputs/polymarket_trade_backtest_trades.csv`.
 
 The Ubuntu deployment captures snapshots every 30 minutes and refreshes resolutions and the rolling backtest daily at 18:10.
+
+## Time-to-Close Layers
+
+The production cycle monitors both today's and tomorrow's contracts. Remaining time is calculated from Polymarket's official event `endDate` and assigned to a 24h, 12h, 6h, or 3h layer. Default probability/edge thresholds are 50%/10%, 52%/8%, 55%/6%, and 60%/5%, respectively. The rolling report publishes hit rate, P&L, and average entry edge separately for every layer.

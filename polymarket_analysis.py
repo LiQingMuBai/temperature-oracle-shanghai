@@ -98,6 +98,7 @@ def main():
         r["edge_at_100_vwap"]=(r["fused_prob"]-r["buy_100_vwap"]) if r["buy_100_vwap"] is not None else None
     rows.sort(key=lambda r:r["fused_prob"],reverse=True)
     out={"as_of":dt.datetime.now().astimezone().isoformat(),"contract_date":target,"slug":slug,
+         "event_end_at":event.get("endDate"),
          "station":"Shanghai Pudong International Airport (ZSPD)","model_forecasts_c":fs,
          "weather_center_c":round(mu,2),"robust_model_spread_c":round(robust_spread,2),
          "raw_weather_center_c":round(raw_mu,2),

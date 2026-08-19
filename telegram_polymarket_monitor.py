@@ -33,6 +33,17 @@ def tomorrow_slug(now=None):
     return target.isoformat(), slug
 
 
+def lead_layer(event_end_at, now=None):
+    end = dt.datetime.fromisoformat(event_end_at.replace("Z", "+00:00"))
+    current = now or dt.datetime.now(dt.timezone.utc)
+    hours = (end - current.astimezone(dt.timezone.utc)).total_seconds() / 3600
+    if hours <= 4.5: bucket = "3h"
+    elif hours <= 9: bucket = "6h"
+    elif hours <= 18: bucket = "12h"
+    else: bucket = "24h"
+    return hours, bucket
+
+
 def run_analysis(slug, target):
     command = [sys.executable, str(ROOT / "polymarket_analysis.py"), "--slug", slug, "--date", target]
     result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180)
@@ -238,6 +249,15 @@ def main():
     minimum_order_shares = int(os.getenv("POLYMARKET_MIN_ORDER_SHARES", "5"))
     snapshot_db = Path(os.getenv("POLYMARKET_SNAPSHOT_DB", ROOT / "work" / "polymarket_snapshots.sqlite3"))
     analysis = run_analysis(slug, target)
+    hours_to_close, lead_bucket = lead_layer(analysis["event_end_at"])
+    if hours_to_close <= 0:
+        print(json.dumps({"slug": slug, "status": "market close time passed"}, ensure_ascii=False))
+        return
+    layer_defaults = {"24h": (0.50, 0.10), "12h": (0.52, 0.08),
+                      "6h": (0.55, 0.06), "3h": (0.60, 0.05)}
+    default_probability, default_edge = layer_defaults[lead_bucket]
+    min_probability = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_PROBABILITY", default_probability))
+    threshold = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_EDGE", default_edge))
     ranked = candidates(analysis, shares, threshold, min_probability, require_mode=True,
                         min_model_support=min_model_support, min_leg_price=min_leg_price)
     best = ranked[0] if ranked else None
@@ -270,6 +290,8 @@ def main():
               "minimum_combo_probability": min_probability, "require_model_mode": True,
               "minimum_model_support": min_model_support, "minimum_leg_price": min_leg_price,
               "max_contract_exposure": max_contract_fraction, "portfolio": portfolio, "best": best}
+    result["hours_to_close"] = hours_to_close
+    result["lead_bucket"] = lead_bucket
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if args.dry_run:
         return
@@ -280,9 +302,10 @@ def main():
         "minimum_leg_price": min_leg_price, "shares_per_outcome": shares,
         "bankroll_usd": bankroll, "maximum_contract_exposure": max_contract_fraction,
         "minimum_order_shares": minimum_order_shares, "portfolio": portfolio,
+        "hours_to_close": hours_to_close, "lead_bucket": lead_bucket,
     })
 
-    state_path = ROOT / "work" / "telegram_monitor_state.json"
+    state_path = ROOT / "work" / f"telegram_monitor_state_{target}.json"
     previous = json.loads(state_path.read_text()) if state_path.exists() else {}
     qualified = best if best and best["qualifies"] else None
     signal_id = "|".join(qualified["outcomes"]) if qualified else None
@@ -296,7 +319,8 @@ def main():
     sent = False
     if should_alert and token and chat_id:
         send_telegram(token, chat_id, format_alert(analysis, qualified))
-        record_paper_trade(snapshot_db, snapshot_run_id, analysis, qualified, bankroll)
+        record_paper_trade(snapshot_db, snapshot_run_id, analysis, qualified, bankroll,
+                           hours_to_close, lead_bucket)
         sent = True
     now_epoch = time.time()
     last_no_signal_notice = float(previous.get("last_no_signal_notice") or 0)
