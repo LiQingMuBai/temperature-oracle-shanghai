@@ -111,6 +111,8 @@ These figures evaluate temperature forecasting, not trading profitability.
 
 The live database stores immutable model state, quotes, full ask depth, candidate baskets, filter decisions, Telegram deliveries, and settlement results.
 
+The production service also sends a Telegram health heartbeat after every 30-minute cycle, reporting whether both today's and tomorrow's market checks completed successfully.
+
 | Metric | Current status |
 |---|---:|
 | Point-in-time snapshot runs | 6 |
