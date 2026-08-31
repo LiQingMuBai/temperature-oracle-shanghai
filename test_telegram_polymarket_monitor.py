@@ -9,7 +9,7 @@ class MonitorTests(unittest.TestCase):
             {"outcome":"31°C","weather_prob":.4,"market_prob":.6,"spread":.02,"bid_size":100,"ask_size":100}]}
         meta=apply_market_fusion(analysis,"3h")
         self.assertAlmostEqual(sum(x["prediction_prob"] for x in analysis["ranking"]),1)
-        self.assertGreater(meta["market_weight"],.3)
+        self.assertGreater(meta["market_weight"],.5)
     def test_current_day_max_conditions_distribution(self):
         analysis={"model_forecasts_c":{"a":29,"b":32},"ranking":[
             {"outcome":"29°C","weather_prob":.3},{"outcome":"30°C","weather_prob":.2},
@@ -29,7 +29,7 @@ class MonitorTests(unittest.TestCase):
             {"outcome": "31°C", "weather_prob": .4, "ask_levels": [{"price": .3, "size": 10}]},
             {"outcome": "32°C", "weather_prob": .2, "ask_levels": [{"price": .5, "size": 10}]},
         ]}
-        best = candidates(analysis, 10, .1, min_model_support=3)[0]
+        best = candidates(analysis, 10, .1, min_model_support=2)[0]
         self.assertEqual(best["outcomes"], ["30°C", "31°C"])
         self.assertTrue(best["qualifies"])
         self.assertTrue(best["contains_market_mode"])

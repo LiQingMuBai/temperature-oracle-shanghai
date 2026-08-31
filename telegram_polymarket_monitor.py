@@ -94,7 +94,7 @@ def condition_on_observed_max(analysis, observed_max_c):
 def apply_market_fusion(analysis, lead_bucket, prior=None):
     """Market-informed prediction probability; independent weather probability stays unchanged for edge."""
     rows = analysis["ranking"]
-    base_weight = {"24h": .15, "12h": .20, "6h": .30, "3h": .40}[lead_bucket]
+    base_weight = {"24h": .35, "12h": .50, "6h": .60, "3h": .70}[lead_bucket]
     weighted_spread = sum(float(r.get("market_prob", 0)) * float(r.get("spread", 1)) for r in rows)
     depth = sum(float(r.get("market_prob", 0)) * (float(r.get("bid_size", 0)) + float(r.get("ask_size", 0))) for r in rows)
     spread_quality = max(.2, min(1., 1 - weighted_spread / .20))
@@ -146,14 +146,15 @@ def execution_limit(levels, shares):
     return None
 
 
-def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=True,
-               min_model_support=3, min_leg_price=0.01):
+def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=False,
+               min_model_support=2, min_leg_price=0.005):
     rows = sorted(analysis["ranking"], key=lambda row: temperature_key(row["outcome"]))
     mode_outcome = max(rows, key=lambda row: float(row["weather_prob"]))["outcome"]
     market_mode_outcome = max(
         rows, key=lambda row: float(row.get("market_prob") or row["weather_prob"]))["outcome"]
     prediction_mode_outcome = max(
         rows, key=lambda row: float(row.get("prediction_prob") or row["weather_prob"]))["outcome"]
+    mode_gap = abs(temperature_key(mode_outcome) - temperature_key(market_mode_outcome))
     labels = [row["outcome"] for row in rows]
     found = []
     for width in (2, 3, 4):
@@ -192,6 +193,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                 "model_mode_outcome": mode_outcome,
                 "market_mode_outcome": market_mode_outcome,
                 "prediction_mode_outcome": prediction_mode_outcome,
+                "weather_market_mode_gap_c": mode_gap,
                 "supporting_models": supporting_models,
                 "model_support_count": len(supporting_models),
                 "minimum_leg_price": min(limits),
@@ -201,6 +203,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                 and prediction_probability >= min_probability
                 and (item["contains_model_mode"] or not require_mode)
                 and item["contains_market_mode"]
+                and mode_gap <= 2
                 and len(supporting_models) >= min_model_support
                 and min(limits) >= min_leg_price
             )
@@ -275,10 +278,10 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
             reasons.append(f"净优势 {item['net_edge']:.1%} < {threshold:.0%}")
         if item.get("prediction_probability", item["model_probability"]) < min_probability:
             reasons.append(f"融合概率 {item.get('prediction_probability',item['model_probability']):.1%} < {min_probability:.0%}")
-        if not item["contains_model_mode"]:
-            reasons.append("未包含模型最高概率温度档")
         if not item.get("contains_market_mode"):
             reasons.append("未包含盘口最高概率温度档")
+        if item.get("weather_market_mode_gap_c", 0) > 2:
+            reasons.append("天气与盘口众数相差超过2°C")
         if item["model_support_count"] < min_model_support:
             reasons.append(f"仅 {item['model_support_count']} 个模式支持，要求至少 {min_model_support} 个")
         if item["minimum_leg_price"] < min_leg_price:
@@ -319,8 +322,8 @@ def main():
     bankroll = float(os.getenv("POLYMARKET_BANKROLL_USD", "10"))
     threshold = float(os.getenv("POLYMARKET_MIN_NET_EDGE", "0.10"))
     min_probability = float(os.getenv("POLYMARKET_MIN_COMBO_PROBABILITY", "0.50"))
-    min_model_support = int(os.getenv("POLYMARKET_MIN_MODEL_SUPPORT", "3"))
-    min_leg_price = float(os.getenv("POLYMARKET_MIN_LEG_PRICE", "0.01"))
+    min_model_support = int(os.getenv("POLYMARKET_MIN_MODEL_SUPPORT", "2"))
+    min_leg_price = float(os.getenv("POLYMARKET_MIN_LEG_PRICE", "0.005"))
     no_signal_hours = float(os.getenv("POLYMARKET_NO_SIGNAL_NOTICE_HOURS", "6"))
     max_contract_fraction = float(os.getenv("POLYMARKET_MAX_CONTRACT_EXPOSURE", "0.20"))
     minimum_order_shares = int(os.getenv("POLYMARKET_MIN_ORDER_SHARES", "5"))
@@ -344,14 +347,14 @@ def main():
     cutoff = (dt.datetime.fromisoformat(analysis["as_of"]) - dt.timedelta(hours=1.5)).isoformat()
     prior_market = prior_market_probabilities(snapshot_db, slug, cutoff)
     market_fusion = apply_market_fusion(analysis, lead_bucket, prior_market)
-    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.65, 0.08),
-                      "6h": (0.70, 0.06), "3h": (0.75, 0.05)}
+    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.60, 0.07),
+                      "6h": (0.65, 0.05), "3h": (0.70, 0.04)}
     default_probability, default_edge = layer_defaults[lead_bucket]
     min_probability = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_PROBABILITY", default_probability))
     threshold = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_EDGE", default_edge))
     layer_enabled = os.getenv(f"POLYMARKET_{lead_bucket.upper()}_ENABLED",
                               "0" if lead_bucket == "24h" else "1") == "1"
-    ranked = candidates(analysis, shares, threshold, min_probability, require_mode=True,
+    ranked = candidates(analysis, shares, threshold, min_probability, require_mode=False,
                         min_model_support=min_model_support, min_leg_price=min_leg_price)
     best = ranked[0] if ranked else None
     if not layer_enabled:
@@ -370,7 +373,7 @@ def main():
             affordable_shares = int(order_budget / best["buy_cost_per_complete_basket"])
             if affordable_shares >= minimum_order_shares:
                 shares = float(min(shares, affordable_shares))
-                ranked = candidates(analysis, shares, threshold, min_probability, require_mode=True,
+                ranked = candidates(analysis, shares, threshold, min_probability, require_mode=False,
                                     min_model_support=min_model_support, min_leg_price=min_leg_price)
                 best = ranked[0] if ranked else None
             else:
@@ -385,7 +388,7 @@ def main():
         best["portfolio_equity_usd"] = portfolio["equity_usd"]
         best["portfolio_after_order_cash_usd"] = max(0.0, portfolio["available_cash_usd"] - best["planned_stake_usd"])
     result = {"checked_at": analysis["as_of"], "slug": slug, "threshold": threshold,
-              "minimum_combo_probability": min_probability, "require_model_mode": True,
+              "minimum_combo_probability": min_probability, "require_model_mode": False,
               "minimum_model_support": min_model_support, "minimum_leg_price": min_leg_price,
               "max_contract_exposure": max_contract_fraction, "portfolio": portfolio, "best": best}
     result["market_fusion"] = market_fusion
@@ -398,7 +401,7 @@ def main():
 
     snapshot_run_id = save_snapshot(snapshot_db, analysis, ranked, {
         "threshold": threshold, "minimum_combo_probability": min_probability,
-        "require_model_mode": True, "minimum_model_support": min_model_support,
+        "require_model_mode": False, "minimum_model_support": min_model_support,
         "minimum_leg_price": min_leg_price, "shares_per_outcome": shares,
         "bankroll_usd": bankroll, "maximum_contract_exposure": max_contract_fraction,
         "minimum_order_shares": minimum_order_shares, "portfolio": portfolio,

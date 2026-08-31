@@ -48,7 +48,7 @@ flowchart TD
 
 Historical bias correction is capped at ±1°C relative to the current raw multi-model center. Order cost is calculated by walking live ask depth for equal shares in every selected bin.
 
-The engine keeps two probability views. Independent weather probability is used for edge calculation; a market-informed prediction probability is used for integer-bin ranking and coverage thresholds. Market weight is capped by lead time (15%/20%/30%/40%) and automatically reduced by wide spreads or weak depth. A bounded two-hour order-book trend adjusts the market signal without feeding market price back into the independent edge estimate.
+The engine keeps two probability views. Independent weather probability is used for edge calculation; a market-informed prediction probability is used for integer-bin ranking and coverage thresholds. In market-core mode, market weight is capped by lead time (35%/50%/60%/70%) and automatically reduced by wide spreads or weak depth. A bounded two-hour trend adjusts the market signal without feeding price back into the independent edge estimate. The market mode is mandatory; weather acts as a safety veto when its mode differs by more than 2°C.
 
 ## Time-to-Close Layers
 
