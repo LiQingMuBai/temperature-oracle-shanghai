@@ -57,9 +57,9 @@ The production monitor follows both today's and tomorrow's markets. Remaining ti
 | Layer | Minimum basket probability | Minimum model edge |
 |---|---:|---:|
 | 24h | 60% | 10% |
-| 12h | 55% | 5% |
-| 6h | 60% | 4% |
-| 3h | 65% | 3% |
+| 12h | 50% | 3% |
+| 6h | 55% | 2% |
+| 3h | 60% | 1% |
 
 Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
 

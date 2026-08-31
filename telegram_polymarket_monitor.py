@@ -147,7 +147,7 @@ def execution_limit(levels, shares):
 
 
 def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=False,
-               min_model_support=2, min_leg_price=0.003):
+               min_model_support=1, min_leg_price=0.001):
     rows = sorted(analysis["ranking"], key=lambda row: temperature_key(row["outcome"]))
     mode_outcome = max(rows, key=lambda row: float(row["weather_prob"]))["outcome"]
     market_mode_outcome = max(
@@ -203,7 +203,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=F
                 and prediction_probability >= min_probability
                 and (item["contains_model_mode"] or not require_mode)
                 and item["contains_market_mode"]
-                and mode_gap <= 2
+                and mode_gap <= 3
                 and len(supporting_models) >= min_model_support
                 and min(limits) >= min_leg_price
             )
@@ -280,8 +280,8 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
             reasons.append(f"融合概率 {item.get('prediction_probability',item['model_probability']):.1%} < {min_probability:.0%}")
         if not item.get("contains_market_mode"):
             reasons.append("未包含盘口最高概率温度档")
-        if item.get("weather_market_mode_gap_c", 0) > 2:
-            reasons.append("天气与盘口众数相差超过2°C")
+        if item.get("weather_market_mode_gap_c", 0) > 3:
+            reasons.append("天气与盘口众数相差超过3°C")
         if item["model_support_count"] < min_model_support:
             reasons.append(f"仅 {item['model_support_count']} 个模式支持，要求至少 {min_model_support} 个")
         if item["minimum_leg_price"] < min_leg_price:
@@ -322,10 +322,10 @@ def main():
     bankroll = float(os.getenv("POLYMARKET_BANKROLL_USD", "10"))
     threshold = float(os.getenv("POLYMARKET_MIN_NET_EDGE", "0.10"))
     min_probability = float(os.getenv("POLYMARKET_MIN_COMBO_PROBABILITY", "0.50"))
-    min_model_support = int(os.getenv("POLYMARKET_MIN_MODEL_SUPPORT", "2"))
-    min_leg_price = float(os.getenv("POLYMARKET_MIN_LEG_PRICE", "0.003"))
+    min_model_support = int(os.getenv("POLYMARKET_MIN_MODEL_SUPPORT", "1"))
+    min_leg_price = float(os.getenv("POLYMARKET_MIN_LEG_PRICE", "0.001"))
     no_signal_hours = float(os.getenv("POLYMARKET_NO_SIGNAL_NOTICE_HOURS", "6"))
-    max_contract_fraction = float(os.getenv("POLYMARKET_MAX_CONTRACT_EXPOSURE", "0.20"))
+    max_contract_fraction = float(os.getenv("POLYMARKET_MAX_CONTRACT_EXPOSURE", "0.30"))
     minimum_order_shares = int(os.getenv("POLYMARKET_MIN_ORDER_SHARES", "5"))
     snapshot_db = Path(os.getenv("POLYMARKET_SNAPSHOT_DB", ROOT / "work" / "polymarket_snapshots.sqlite3"))
     analysis = run_analysis(slug, target)
@@ -347,8 +347,8 @@ def main():
     cutoff = (dt.datetime.fromisoformat(analysis["as_of"]) - dt.timedelta(hours=1.5)).isoformat()
     prior_market = prior_market_probabilities(snapshot_db, slug, cutoff)
     market_fusion = apply_market_fusion(analysis, lead_bucket, prior_market)
-    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.55, 0.05),
-                      "6h": (0.60, 0.04), "3h": (0.65, 0.03)}
+    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.50, 0.03),
+                      "6h": (0.55, 0.02), "3h": (0.60, 0.01)}
     default_probability, default_edge = layer_defaults[lead_bucket]
     min_probability = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_PROBABILITY", default_probability))
     threshold = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_EDGE", default_edge))
