@@ -82,6 +82,24 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   ,market_weight REAL
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_slug ON paper_trades(slug, notified_at);
+CREATE TABLE IF NOT EXISTS shadow_trades (
+  id INTEGER PRIMARY KEY,
+  strategy TEXT NOT NULL,
+  run_id INTEGER NOT NULL REFERENCES runs(id) ON DELETE RESTRICT,
+  entered_at TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  contract_date TEXT NOT NULL,
+  lead_bucket TEXT NOT NULL,
+  outcomes_json TEXT NOT NULL,
+  prediction_probability REAL NOT NULL,
+  weather_probability REAL NOT NULL,
+  executable_cost REAL NOT NULL,
+  net_edge REAL NOT NULL,
+  stake_usd REAL NOT NULL,
+  shares REAL NOT NULL,
+  UNIQUE(strategy, slug, lead_bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_trades_slug ON shadow_trades(slug, strategy);
 """
 
 
@@ -177,6 +195,39 @@ def prior_market_probabilities(path, slug, before_iso):
         if not row: return None
         probabilities = dict(db.execute("SELECT outcome,market_prob FROM outcomes WHERE run_id=?", (row[0],)))
         return {"captured_at": row[1], "probabilities": probabilities}
+
+
+def record_shadow_trades(path, run_id, analysis, ranked, lead_bucket):
+    """Record first $1 entry per contract/layer for parallel research policies."""
+    policies = {
+        "market_core_relaxed": {"prob": {"24h": .50, "12h": .50, "6h": .55, "3h": .60}[lead_bucket],
+            "edge": {"24h": .03, "12h": .03, "6h": .02, "3h": .01}[lead_bucket],
+            "support": 1, "min_price": .001, "max_gap": 3},
+        "market_price_benchmark": {"prob": .50, "edge": -1., "support": 0,
+            "min_price": .001, "max_gap": 99},
+    }
+    inserted=[]
+    with connect(path) as db:
+        for strategy,policy in policies.items():
+            eligible=[item for item in ranked if item.get("contains_market_mode")
+                and item.get("prediction_probability",0)>=policy["prob"]
+                and item["net_edge"]>=policy["edge"]
+                and item["model_support_count"]>=policy["support"]
+                and item["minimum_leg_price"]>=policy["min_price"]
+                and item.get("weather_market_mode_gap_c",0)<=policy["max_gap"]
+                and item["buy_cost_per_complete_basket"]>0]
+            if not eligible: continue
+            item=max(eligible,key=lambda x:(x["prediction_probability"],x["net_edge"]))
+            cost=float(item["buy_cost_per_complete_basket"]);stake=1.
+            cur=db.execute("""INSERT OR IGNORE INTO shadow_trades
+              (strategy,run_id,entered_at,slug,contract_date,lead_bucket,outcomes_json,
+               prediction_probability,weather_probability,executable_cost,net_edge,stake_usd,shares)
+              VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",(
+              strategy,run_id,analysis["as_of"],analysis["slug"],analysis["contract_date"],lead_bucket,
+              json.dumps(item["outcomes"],ensure_ascii=False),item["prediction_probability"],
+              item["model_probability"],cost,item["net_edge"],stake,stake/cost))
+            if cur.rowcount: inserted.append(strategy)
+    return inserted
 
 
 def portfolio_state(path, starting_bankroll, current_slug):

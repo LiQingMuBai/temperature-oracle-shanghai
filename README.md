@@ -83,6 +83,8 @@ flowchart LR
 
 The paper ledger treats every successfully delivered formal Telegram bet alert as one simulated trade. No-opportunity notices are not trades. Fees are excluded from the signal rule and current P&L report, so reported returns may overstate realizable returns.
 
+To collect more evidence without weakening formal alerts, two shadow portfolios run in parallel. A relaxed market-core strategy and a market-price benchmark each record at most one fixed-$1 paper entry per contract and lead-time layer. Shadow results are reported separately and are never sent as betting recommendations.
+
 ## Weather Backtest Results
 
 All weather results use walk-forward evaluation rather than random train/test shuffling.

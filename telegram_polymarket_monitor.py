@@ -13,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from polymarket_snapshot_db import portfolio_state, prior_market_probabilities, record_paper_trade, save_snapshot
+from polymarket_snapshot_db import portfolio_state, prior_market_probabilities, record_paper_trade, record_shadow_trades, save_snapshot
 from zspd_observations import current_day_max
 
 ROOT = Path(__file__).resolve().parent
@@ -410,6 +410,9 @@ def main():
         "current_day_observation": analysis.get("current_day_observation"),
         "market_fusion": market_fusion,
     })
+    shadow_entries = record_shadow_trades(snapshot_db, snapshot_run_id, analysis, ranked, lead_bucket)
+    if shadow_entries:
+        print(json.dumps({"shadow_entries_recorded": shadow_entries}, ensure_ascii=False))
 
     state_path = ROOT / "work" / f"telegram_monitor_state_{target}.json"
     previous = json.loads(state_path.read_text()) if state_path.exists() else {}

@@ -68,6 +68,9 @@ def build_report(db_path, starting_bankroll=10.0):
           FROM paper_trades p JOIN resolutions z ON z.slug=p.slug
           ORDER BY p.contract_date,p.notified_at
         """).fetchall()
+        shadow_rows = db.execute("""SELECT s.strategy,s.lead_bucket,s.outcomes_json,s.stake_usd,
+            s.shares,s.net_edge,z.winning_outcome FROM shadow_trades s
+            JOIN resolutions z ON z.slug=s.slug ORDER BY s.entered_at""").fetchall()
     trades=[]; equity=starting_bankroll; peak=equity; max_drawdown=0.0
     for slug,date,captured,outcomes_json,prob,cost,edge,shares,winner,hours_to_close,lead_bucket,prediction_prob,market_weight in rows:
         outcomes=json.loads(outcomes_json); stake=cost*shares; hit=winner in outcomes
@@ -81,6 +84,17 @@ def build_report(db_path, starting_bankroll=10.0):
         trades[-1]["prediction_probability"]=prediction_prob
         trades[-1]["market_weight"]=market_weight
     wins=sum(t["hit"] for t in trades); total_pnl=sum(t["pnl_usd"] for t in trades)
+    shadow_performance={}
+    for strategy,layer,outcomes_json,stake,shares,edge,winner in shadow_rows:
+        key=f"{strategy}:{layer}"
+        row=shadow_performance.setdefault(key,{"strategy":strategy,"lead_bucket":layer,
+            "trades":0,"wins":0,"pnl_usd":0.,"edge_sum":0.})
+        hit=winner in json.loads(outcomes_json)
+        row["trades"]+=1;row["wins"]+=int(hit)
+        row["pnl_usd"]+=(shares if hit else 0)-stake;row["edge_sum"]+=edge
+    for row in shadow_performance.values():
+        row["hit_rate"]=row["wins"]/row["trades"]
+        row["average_weather_edge"]=row.pop("edge_sum")/row["trades"]
     lead_time_performance={}
     for bucket in ("24h","12h","6h","3h","unknown"):
         group=[t for t in trades if t["lead_bucket"]==bucket]
@@ -98,6 +112,7 @@ def build_report(db_path, starting_bankroll=10.0):
         "ending_equity_usd":equity,"total_pnl_usd":total_pnl,
         "return_pct":total_pnl/starting_bankroll if starting_bankroll else None,
         "maximum_drawdown_pct":max_drawdown,"lead_time_performance":lead_time_performance,
+        "shadow_strategy_performance":list(shadow_performance.values()),
         "trades":trades}
     return report
 
