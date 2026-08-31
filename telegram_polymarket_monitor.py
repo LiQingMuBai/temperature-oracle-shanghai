@@ -147,7 +147,8 @@ def execution_limit(levels, shares):
 
 
 def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=False,
-               min_model_support=1, min_leg_price=0.001):
+               min_model_support=1, min_leg_price=0.001,
+               min_value_probability=0.20, min_value_edge=0.10):
     rows = sorted(analysis["ranking"], key=lambda row: temperature_key(row["outcome"]))
     mode_outcome = max(rows, key=lambda row: float(row["weather_prob"]))["outcome"]
     market_mode_outcome = max(
@@ -198,11 +199,16 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=F
                 "model_support_count": len(supporting_models),
                 "minimum_leg_price": min(limits),
             }
+            core_signal = prediction_probability >= min_probability and item["contains_market_mode"]
+            value_signal = (
+                prediction_probability >= min_value_probability
+                and edge >= min_value_edge
+            )
+            item["signal_type"] = "market_core" if core_signal else "value_exploration"
             item["qualifies"] = (
                 edge >= threshold
-                and prediction_probability >= min_probability
+                and (core_signal or value_signal)
                 and (item["contains_model_mode"] or not require_mode)
-                and item["contains_market_mode"]
                 and mode_gap <= 3
                 and len(supporting_models) >= min_model_support
                 and min(limits) >= min_leg_price
@@ -244,9 +250,11 @@ def format_alert(analysis, item):
     observation = analysis.get("current_day_observation")
     observation_line = (f"今日ZSPD已观测最高温：{observation['max_temp_c']:.1f}°C\n"
                         if observation and observation.get("applied") else "")
+    signal_name = "盘口核心" if item.get("signal_type") == "market_core" else "探索型低价价值"
     return (
         "上海最高温组合出现量化信号\n"
         f"日期：{analysis['contract_date']}\n"
+        f"信号类型：{signal_name}\n"
         f"{observation_line}"
         f"组合：{labels}\n"
         f"模型组合概率：{item['model_probability']:.1%}\n"
@@ -324,6 +332,8 @@ def main():
     min_probability = float(os.getenv("POLYMARKET_MIN_COMBO_PROBABILITY", "0.50"))
     min_model_support = int(os.getenv("POLYMARKET_MIN_MODEL_SUPPORT", "1"))
     min_leg_price = float(os.getenv("POLYMARKET_MIN_LEG_PRICE", "0.001"))
+    min_value_probability = float(os.getenv("POLYMARKET_MIN_VALUE_PROBABILITY", "0.20"))
+    min_value_edge = float(os.getenv("POLYMARKET_MIN_VALUE_EDGE", "0.10"))
     no_signal_hours = float(os.getenv("POLYMARKET_NO_SIGNAL_NOTICE_HOURS", "6"))
     max_contract_fraction = float(os.getenv("POLYMARKET_MAX_CONTRACT_EXPOSURE", "0.30"))
     minimum_order_shares = int(os.getenv("POLYMARKET_MIN_ORDER_SHARES", "5"))
@@ -347,15 +357,17 @@ def main():
     cutoff = (dt.datetime.fromisoformat(analysis["as_of"]) - dt.timedelta(hours=1.5)).isoformat()
     prior_market = prior_market_probabilities(snapshot_db, slug, cutoff)
     market_fusion = apply_market_fusion(analysis, lead_bucket, prior_market)
-    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.50, 0.03),
-                      "6h": (0.55, 0.02), "3h": (0.60, 0.01)}
+    # Market-led opportunity profile: enter earlier for data collection, while
+    # still requiring positive weather-model edge and executable depth.
+    layer_defaults = {"24h": (0.55, 0.05), "12h": (0.48, 0.02),
+                      "6h": (0.50, 0.01), "3h": (0.52, 0.005)}
     default_probability, default_edge = layer_defaults[lead_bucket]
     min_probability = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_PROBABILITY", default_probability))
     threshold = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_EDGE", default_edge))
-    layer_enabled = os.getenv(f"POLYMARKET_{lead_bucket.upper()}_ENABLED",
-                              "0" if lead_bucket == "24h" else "1") == "1"
+    layer_enabled = os.getenv(f"POLYMARKET_{lead_bucket.upper()}_ENABLED", "1") == "1"
     ranked = candidates(analysis, shares, threshold, min_probability, require_mode=False,
-                        min_model_support=min_model_support, min_leg_price=min_leg_price)
+                        min_model_support=min_model_support, min_leg_price=min_leg_price,
+                        min_value_probability=min_value_probability, min_value_edge=min_value_edge)
     best = ranked[0] if ranked else None
     if not layer_enabled:
         for item in ranked:
@@ -374,7 +386,9 @@ def main():
             if affordable_shares >= minimum_order_shares:
                 shares = float(min(shares, affordable_shares))
                 ranked = candidates(analysis, shares, threshold, min_probability, require_mode=False,
-                                    min_model_support=min_model_support, min_leg_price=min_leg_price)
+                                    min_model_support=min_model_support, min_leg_price=min_leg_price,
+                                    min_value_probability=min_value_probability,
+                                    min_value_edge=min_value_edge)
                 best = ranked[0] if ranked else None
             else:
                 best["qualifies"] = False
@@ -390,6 +404,8 @@ def main():
     result = {"checked_at": analysis["as_of"], "slug": slug, "threshold": threshold,
               "minimum_combo_probability": min_probability, "require_model_mode": False,
               "minimum_model_support": min_model_support, "minimum_leg_price": min_leg_price,
+              "minimum_value_probability": min_value_probability,
+              "minimum_value_edge": min_value_edge,
               "max_contract_exposure": max_contract_fraction, "portfolio": portfolio, "best": best}
     result["market_fusion"] = market_fusion
     result["layer_trading_enabled"] = layer_enabled
@@ -403,6 +419,8 @@ def main():
         "threshold": threshold, "minimum_combo_probability": min_probability,
         "require_model_mode": False, "minimum_model_support": min_model_support,
         "minimum_leg_price": min_leg_price, "shares_per_outcome": shares,
+        "minimum_value_probability": min_value_probability,
+        "minimum_value_edge": min_value_edge,
         "bankroll_usd": bankroll, "maximum_contract_exposure": max_contract_fraction,
         "minimum_order_shares": minimum_order_shares, "portfolio": portfolio,
         "hours_to_close": hours_to_close, "lead_bucket": lead_bucket,
@@ -417,7 +435,9 @@ def main():
     state_path = ROOT / "work" / f"telegram_monitor_state_{target}.json"
     previous = json.loads(state_path.read_text()) if state_path.exists() else {}
     qualified = best if best and best["qualifies"] else None
-    signal_id = "|".join(qualified["outcomes"]) if qualified else None
+    # The same basket in a closer layer is a new backtest sample. Only suppress
+    # duplicate notifications inside the same lead-time layer.
+    signal_id = f"{lead_bucket}|" + "|".join(qualified["outcomes"]) if qualified else None
     prior_edge_value = previous.get("edge")
     prior_edge = float(prior_edge_value) if prior_edge_value is not None else -99.0
     should_alert = bool(qualified) and (

@@ -56,14 +56,16 @@ The production monitor follows both today's and tomorrow's markets. Remaining ti
 
 | Layer | Minimum basket probability | Minimum model edge |
 |---|---:|---:|
-| 24h | 60% | 10% |
-| 12h | 50% | 3% |
-| 6h | 55% | 2% |
-| 3h | 60% | 1% |
+| 24h | 55% | 5% |
+| 12h | 48% | 2% |
+| 6h | 50% | 1% |
+| 3h | 52% | 0.5% |
 
 Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
 
-The 24h layer is observation-only until more settled trades are available. Tradable baskets may contain two, three, or four adjacent bins and must include both the weather-probability mode and the market-probability mode.
+Every layer may create one independent paper-trade sample. Tradable baskets may contain two, three, or four adjacent bins and must include the market-probability mode.
+
+An exploratory value channel also admits discounted adjacent baskets outside the market mode when fused probability is at least 20% and independent weather-model edge is at least 10%. It never admits negative-edge trades.
 
 For today's 6h and 3h layers, fresh ZSPD METAR observations condition the distribution on the maximum temperature already observed. Bins below the observed maximum become impossible. Observations older than two hours are recorded but never used for trading decisions.
 
