@@ -57,9 +57,9 @@ The production monitor follows both today's and tomorrow's markets. Remaining ti
 | Layer | Minimum basket probability | Minimum model edge |
 |---|---:|---:|
 | 24h | 60% | 10% |
-| 12h | 65% | 8% |
-| 6h | 70% | 6% |
-| 3h | 75% | 5% |
+| 12h | 55% | 5% |
+| 6h | 60% | 4% |
+| 3h | 65% | 3% |
 
 Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
 
@@ -117,7 +117,7 @@ These figures evaluate temperature forecasting, not trading profitability.
 
 The live database stores immutable model state, quotes, full ask depth, candidate baskets, filter decisions, Telegram deliveries, and settlement results.
 
-The production service also sends a Telegram health heartbeat after every 30-minute cycle, reporting whether both today's and tomorrow's market checks completed successfully.
+The production service also sends a Telegram health heartbeat after every 15-minute cycle, reporting whether both today's and tomorrow's market checks completed successfully.
 
 | Metric | Current status |
 |---|---:|
