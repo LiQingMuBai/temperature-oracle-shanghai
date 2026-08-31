@@ -118,9 +118,11 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                min_model_support=3, min_leg_price=0.01):
     rows = sorted(analysis["ranking"], key=lambda row: temperature_key(row["outcome"]))
     mode_outcome = max(rows, key=lambda row: float(row["weather_prob"]))["outcome"]
+    market_mode_outcome = max(
+        rows, key=lambda row: float(row.get("market_prob") or row["weather_prob"]))["outcome"]
     labels = [row["outcome"] for row in rows]
     found = []
-    for width in (2, 3):
+    for width in (2, 3, 4):
         for start in range(len(rows) - width + 1):
             basket = rows[start:start + width]
             fills = [fill_cost(row.get("ask_levels", []), shares) for row in basket]
@@ -149,6 +151,9 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                 "buy_cost_per_complete_basket": gross_cost / shares,
                 "net_edge": edge,
                 "contains_model_mode": mode_outcome in outcomes,
+                "contains_market_mode": market_mode_outcome in outcomes,
+                "model_mode_outcome": mode_outcome,
+                "market_mode_outcome": market_mode_outcome,
                 "supporting_models": supporting_models,
                 "model_support_count": len(supporting_models),
                 "minimum_leg_price": min(limits),
@@ -157,6 +162,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                 edge >= threshold
                 and model_probability >= min_probability
                 and (item["contains_model_mode"] or not require_mode)
+                and item["contains_market_mode"]
                 and len(supporting_models) >= min_model_support
                 and min(limits) >= min_leg_price
             )
@@ -232,12 +238,16 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
             reasons.append(f"组合概率 {item['model_probability']:.1%} < {min_probability:.0%}")
         if not item["contains_model_mode"]:
             reasons.append("未包含模型最高概率温度档")
+        if not item.get("contains_market_mode"):
+            reasons.append("未包含盘口最高概率温度档")
         if item["model_support_count"] < min_model_support:
             reasons.append(f"仅 {item['model_support_count']} 个模式支持，要求至少 {min_model_support} 个")
         if item["minimum_leg_price"] < min_leg_price:
             reasons.append(f"存在低于 {min_leg_price:.0%} 的廉价尾部档")
         if item.get("capital_rejection"):
             reasons.append("可用现金或单合约风险额度不足")
+        if item.get("layer_rejection"):
+            reasons.append("该时间层当前只观察、不下注")
         detail = (
             f"最接近组合：{' + '.join(item['outcomes'])}\n"
             f"模型概率：{item['model_probability']:.1%}；买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
@@ -292,14 +302,21 @@ def main():
             analysis["current_day_observation"] = observation
             if observation["applied"]:
                 condition_on_observed_max(analysis, observation["max_temp_c"])
-    layer_defaults = {"24h": (0.50, 0.10), "12h": (0.52, 0.08),
-                      "6h": (0.55, 0.06), "3h": (0.60, 0.05)}
+    layer_defaults = {"24h": (0.60, 0.10), "12h": (0.65, 0.08),
+                      "6h": (0.70, 0.06), "3h": (0.75, 0.05)}
     default_probability, default_edge = layer_defaults[lead_bucket]
     min_probability = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_PROBABILITY", default_probability))
     threshold = float(os.getenv(f"POLYMARKET_{lead_bucket.upper()}_MIN_EDGE", default_edge))
+    layer_enabled = os.getenv(f"POLYMARKET_{lead_bucket.upper()}_ENABLED",
+                              "0" if lead_bucket == "24h" else "1") == "1"
     ranked = candidates(analysis, shares, threshold, min_probability, require_mode=True,
                         min_model_support=min_model_support, min_leg_price=min_leg_price)
     best = ranked[0] if ranked else None
+    if not layer_enabled:
+        for item in ranked:
+            item["qualifies"] = False
+            item["layer_rejection"] = f"{lead_bucket} trading disabled"
+        best = ranked[0] if ranked else None
     portfolio = portfolio_state(snapshot_db, bankroll, slug)
     contract_limit = max(0.0, portfolio["equity_usd"] * max_contract_fraction)
     order_budget = min(portfolio["available_cash_usd"],
@@ -329,6 +346,7 @@ def main():
               "minimum_combo_probability": min_probability, "require_model_mode": True,
               "minimum_model_support": min_model_support, "minimum_leg_price": min_leg_price,
               "max_contract_exposure": max_contract_fraction, "portfolio": portfolio, "best": best}
+    result["layer_trading_enabled"] = layer_enabled
     result["hours_to_close"] = hours_to_close
     result["lead_bucket"] = lead_bucket
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -342,6 +360,7 @@ def main():
         "bankroll_usd": bankroll, "maximum_contract_exposure": max_contract_fraction,
         "minimum_order_shares": minimum_order_shares, "portfolio": portfolio,
         "hours_to_close": hours_to_close, "lead_bucket": lead_bucket,
+        "layer_trading_enabled": layer_enabled,
         "current_day_observation": analysis.get("current_day_observation"),
     })
 

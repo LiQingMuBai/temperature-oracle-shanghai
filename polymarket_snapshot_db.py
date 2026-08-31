@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS candidates (
   net_edge REAL NOT NULL,
   qualifies INTEGER NOT NULL,
   contains_model_mode INTEGER NOT NULL,
+  contains_market_mode INTEGER NOT NULL DEFAULT 0,
   model_support_count INTEGER NOT NULL,
   minimum_leg_price REAL NOT NULL,
   shares_per_outcome REAL NOT NULL,
@@ -88,6 +89,7 @@ def connect(path):
     for table, columns in {
         "runs": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
         "paper_trades": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
+        "candidates": [("contains_market_mode", "INTEGER NOT NULL DEFAULT 0")],
     }.items():
         existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         for name, kind in columns:
@@ -118,12 +120,16 @@ def save_snapshot(path, analysis, ranked, config):
                 row.get("best_bid"), row.get("best_ask"), row.get("bid_size"), row.get("ask_size"),
                 json.dumps(row.get("ask_levels", []))))
         for rank_no, item in enumerate(ranked, 1):
-            db.execute("""INSERT OR REPLACE INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""", (
+            db.execute("""INSERT OR REPLACE INTO candidates
+                (run_id,rank_no,outcomes_json,legs_json,model_probability,executable_cost,
+                 net_edge,qualifies,contains_model_mode,model_support_count,minimum_leg_price,
+                 shares_per_outcome,contains_market_mode) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 run_id, rank_no, json.dumps(item["outcomes"], ensure_ascii=False),
                 json.dumps(item["legs"], ensure_ascii=False), item["model_probability"],
                 item["buy_cost_per_complete_basket"], item["net_edge"], int(item["qualifies"]),
                 int(item["contains_model_mode"]), item["model_support_count"],
-                item["minimum_leg_price"], item["shares_per_outcome"]))
+                item["minimum_leg_price"], item["shares_per_outcome"],
+                int(item.get("contains_market_mode", False))))
         return run_id
 
 

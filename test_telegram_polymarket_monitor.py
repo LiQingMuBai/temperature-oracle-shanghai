@@ -25,6 +25,7 @@ class MonitorTests(unittest.TestCase):
         best = candidates(analysis, 10, .1, min_model_support=3)[0]
         self.assertEqual(best["outcomes"], ["30°C", "31°C"])
         self.assertTrue(best["qualifies"])
+        self.assertTrue(best["contains_market_mode"])
         self.assertEqual(best["legs"][0]["limit_price"], .2)
         best["portfolio_available_cash_usd"] = 8
         message = format_alert({"contract_date":"2026-08-20","slug":"test"}, best)
