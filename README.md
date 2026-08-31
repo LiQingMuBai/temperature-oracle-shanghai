@@ -48,6 +48,8 @@ flowchart TD
 
 Historical bias correction is capped at ±1°C relative to the current raw multi-model center. Order cost is calculated by walking live ask depth for equal shares in every selected bin.
 
+The engine keeps two probability views. Independent weather probability is used for edge calculation; a market-informed prediction probability is used for integer-bin ranking and coverage thresholds. Market weight is capped by lead time (15%/20%/30%/40%) and automatically reduced by wide spreads or weak depth. A bounded two-hour order-book trend adjusts the market signal without feeding market price back into the independent edge estimate.
+
 ## Time-to-Close Layers
 
 The production monitor follows both today's and tomorrow's markets. Remaining time comes from Polymarket's official event end time.

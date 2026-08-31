@@ -1,8 +1,15 @@
 import unittest
-from telegram_polymarket_monitor import candidates, condition_on_observed_max, execution_limit, fill_cost, format_alert
+from telegram_polymarket_monitor import apply_market_fusion, candidates, condition_on_observed_max, execution_limit, fill_cost, format_alert
 
 
 class MonitorTests(unittest.TestCase):
+    def test_market_fusion_is_normalized(self):
+        analysis={"ranking":[
+            {"outcome":"30°C","weather_prob":.6,"market_prob":.4,"spread":.02,"bid_size":100,"ask_size":100},
+            {"outcome":"31°C","weather_prob":.4,"market_prob":.6,"spread":.02,"bid_size":100,"ask_size":100}]}
+        meta=apply_market_fusion(analysis,"3h")
+        self.assertAlmostEqual(sum(x["prediction_prob"] for x in analysis["ranking"]),1)
+        self.assertGreater(meta["market_weight"],.3)
     def test_current_day_max_conditions_distribution(self):
         analysis={"model_forecasts_c":{"a":29,"b":32},"ranking":[
             {"outcome":"29°C","weather_prob":.3},{"outcome":"30°C","weather_prob":.2},

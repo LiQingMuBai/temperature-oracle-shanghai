@@ -3,6 +3,7 @@
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import subprocess
@@ -12,7 +13,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
-from polymarket_snapshot_db import portfolio_state, record_paper_trade, save_snapshot
+from polymarket_snapshot_db import portfolio_state, prior_market_probabilities, record_paper_trade, save_snapshot
 from zspd_observations import current_day_max
 
 ROOT = Path(__file__).resolve().parent
@@ -90,6 +91,37 @@ def condition_on_observed_max(analysis, observed_max_c):
         for name, value in analysis.get("model_forecasts_c", {}).items()}
 
 
+def apply_market_fusion(analysis, lead_bucket, prior=None):
+    """Market-informed prediction probability; independent weather probability stays unchanged for edge."""
+    rows = analysis["ranking"]
+    base_weight = {"24h": .15, "12h": .20, "6h": .30, "3h": .40}[lead_bucket]
+    weighted_spread = sum(float(r.get("market_prob", 0)) * float(r.get("spread", 1)) for r in rows)
+    depth = sum(float(r.get("market_prob", 0)) * (float(r.get("bid_size", 0)) + float(r.get("ask_size", 0))) for r in rows)
+    spread_quality = max(.2, min(1., 1 - weighted_spread / .20))
+    depth_quality = max(.2, min(1., math.log1p(depth) / math.log(201)))
+    market_weight = base_weight * math.sqrt(spread_quality * depth_quality)
+    prior_probs = prior["probabilities"] if prior else {}
+    trended = {}
+    for row in rows:
+        current = float(row.get("market_prob") or 0)
+        old = prior_probs.get(row["outcome"])
+        # Half-strength two-hour extrapolation, bounded by non-negativity and later normalization.
+        trended[row["outcome"]] = max(1e-8, current + .5 * (current - float(old))) if old is not None else max(1e-8, current)
+    total_market = sum(trended.values())
+    raw=[]
+    for row in rows:
+        market_signal = trended[row["outcome"]] / total_market
+        value = max(float(row["weather_prob"]), 1e-8) ** (1-market_weight) * max(market_signal, 1e-8) ** market_weight
+        raw.append(value)
+    total=sum(raw)
+    for row,value in zip(rows,raw):
+        row["prediction_prob"] = value / total
+        row["market_weight"] = market_weight
+    return {"market_weight":market_weight,"base_weight":base_weight,
+            "spread_quality":spread_quality,"depth_quality":depth_quality,
+            "trend_reference_at":prior.get("captured_at") if prior else None}
+
+
 def fill_cost(levels, shares):
     remaining = shares
     cost = 0.0
@@ -120,6 +152,8 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
     mode_outcome = max(rows, key=lambda row: float(row["weather_prob"]))["outcome"]
     market_mode_outcome = max(
         rows, key=lambda row: float(row.get("market_prob") or row["weather_prob"]))["outcome"]
+    prediction_mode_outcome = max(
+        rows, key=lambda row: float(row.get("prediction_prob") or row["weather_prob"]))["outcome"]
     labels = [row["outcome"] for row in rows]
     found = []
     for width in (2, 3, 4):
@@ -129,6 +163,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
             if any(fill is None for fill in fills):
                 continue
             model_probability = sum(float(row["weather_prob"]) for row in basket)
+            prediction_probability = sum(float(row.get("prediction_prob") or row["weather_prob"]) for row in basket)
             gross_cost = sum(fills)
             # One complete basket pays `shares` dollars when any selected bin wins.
             edge_dollars = shares * model_probability - gross_cost
@@ -148,19 +183,22 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=T
                 } for row, fill, limit in zip(basket, fills, limits)],
                 "shares_per_outcome": shares,
                 "model_probability": model_probability,
+                "prediction_probability": prediction_probability,
+                "market_weight": float(basket[0].get("market_weight") or 0),
                 "buy_cost_per_complete_basket": gross_cost / shares,
                 "net_edge": edge,
                 "contains_model_mode": mode_outcome in outcomes,
                 "contains_market_mode": market_mode_outcome in outcomes,
                 "model_mode_outcome": mode_outcome,
                 "market_mode_outcome": market_mode_outcome,
+                "prediction_mode_outcome": prediction_mode_outcome,
                 "supporting_models": supporting_models,
                 "model_support_count": len(supporting_models),
                 "minimum_leg_price": min(limits),
             }
             item["qualifies"] = (
                 edge >= threshold
-                and model_probability >= min_probability
+                and prediction_probability >= min_probability
                 and (item["contains_model_mode"] or not require_mode)
                 and item["contains_market_mode"]
                 and len(supporting_models) >= min_model_support
@@ -209,6 +247,7 @@ def format_alert(analysis, item):
         f"{observation_line}"
         f"组合：{labels}\n"
         f"模型组合概率：{item['model_probability']:.1%}\n"
+        f"市场融合预测概率：{item['prediction_probability']:.1%}\n"
         f"可成交买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
         f"净优势：{item['net_edge']:.1%}\n"
         f"深度口径：每档 {item['shares_per_outcome']:g} 份\n"
@@ -234,8 +273,8 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
         reasons = []
         if item["net_edge"] < threshold:
             reasons.append(f"净优势 {item['net_edge']:.1%} < {threshold:.0%}")
-        if item["model_probability"] < min_probability:
-            reasons.append(f"组合概率 {item['model_probability']:.1%} < {min_probability:.0%}")
+        if item.get("prediction_probability", item["model_probability"]) < min_probability:
+            reasons.append(f"融合概率 {item.get('prediction_probability',item['model_probability']):.1%} < {min_probability:.0%}")
         if not item["contains_model_mode"]:
             reasons.append("未包含模型最高概率温度档")
         if not item.get("contains_market_mode"):
@@ -250,7 +289,7 @@ def format_no_signal(analysis, item, threshold, min_probability, min_model_suppo
             reasons.append("该时间层当前只观察、不下注")
         detail = (
             f"最接近组合：{' + '.join(item['outcomes'])}\n"
-            f"模型概率：{item['model_probability']:.1%}；买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
+            f"天气概率：{item['model_probability']:.1%}；融合概率：{item.get('prediction_probability',item['model_probability']):.1%}；买入成本：{item['buy_cost_per_complete_basket']:.1%}\n"
             f"未通过：{'；'.join(reasons) if reasons else '稳健性规则'}"
         )
     observation = analysis.get("current_day_observation")
@@ -302,6 +341,9 @@ def main():
             analysis["current_day_observation"] = observation
             if observation["applied"]:
                 condition_on_observed_max(analysis, observation["max_temp_c"])
+    cutoff = (dt.datetime.fromisoformat(analysis["as_of"]) - dt.timedelta(hours=1.5)).isoformat()
+    prior_market = prior_market_probabilities(snapshot_db, slug, cutoff)
+    market_fusion = apply_market_fusion(analysis, lead_bucket, prior_market)
     layer_defaults = {"24h": (0.60, 0.10), "12h": (0.65, 0.08),
                       "6h": (0.70, 0.06), "3h": (0.75, 0.05)}
     default_probability, default_edge = layer_defaults[lead_bucket]
@@ -346,6 +388,7 @@ def main():
               "minimum_combo_probability": min_probability, "require_model_mode": True,
               "minimum_model_support": min_model_support, "minimum_leg_price": min_leg_price,
               "max_contract_exposure": max_contract_fraction, "portfolio": portfolio, "best": best}
+    result["market_fusion"] = market_fusion
     result["layer_trading_enabled"] = layer_enabled
     result["hours_to_close"] = hours_to_close
     result["lead_bucket"] = lead_bucket
@@ -362,6 +405,7 @@ def main():
         "hours_to_close": hours_to_close, "lead_bucket": lead_bucket,
         "layer_trading_enabled": layer_enabled,
         "current_day_observation": analysis.get("current_day_observation"),
+        "market_fusion": market_fusion,
     })
 
     state_path = ROOT / "work" / f"telegram_monitor_state_{target}.json"

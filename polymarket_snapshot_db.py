@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS outcomes (
   bid_size REAL,
   ask_size REAL,
   ask_levels_json TEXT NOT NULL,
+  prediction_prob REAL,
+  market_weight REAL,
   PRIMARY KEY(run_id, outcome)
 );
 CREATE TABLE IF NOT EXISTS candidates (
@@ -45,6 +47,8 @@ CREATE TABLE IF NOT EXISTS candidates (
   qualifies INTEGER NOT NULL,
   contains_model_mode INTEGER NOT NULL,
   contains_market_mode INTEGER NOT NULL DEFAULT 0,
+  prediction_probability REAL,
+  market_weight REAL,
   model_support_count INTEGER NOT NULL,
   minimum_leg_price REAL NOT NULL,
   shares_per_outcome REAL NOT NULL,
@@ -74,6 +78,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   bankroll_at_signal_usd REAL NOT NULL,
   hours_to_close REAL,
   lead_bucket TEXT
+  ,prediction_probability REAL
+  ,market_weight REAL
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_slug ON paper_trades(slug, notified_at);
 """
@@ -90,11 +96,18 @@ def connect(path):
         "runs": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
         "paper_trades": [("hours_to_close", "REAL"), ("lead_bucket", "TEXT")],
         "candidates": [("contains_market_mode", "INTEGER NOT NULL DEFAULT 0")],
+        "outcomes": [("prediction_prob", "REAL"), ("market_weight", "REAL")],
     }.items():
         existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
         for name, kind in columns:
             if name not in existing:
                 db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
+    existing = {row[1] for row in db.execute("PRAGMA table_info(candidates)")}
+    for name, kind in [("prediction_probability", "REAL"), ("market_weight", "REAL")]:
+        if name not in existing: db.execute(f"ALTER TABLE candidates ADD COLUMN {name} {kind}")
+    existing = {row[1] for row in db.execute("PRAGMA table_info(paper_trades)")}
+    for name, kind in [("prediction_probability", "REAL"), ("market_weight", "REAL")]:
+        if name not in existing: db.execute(f"ALTER TABLE paper_trades ADD COLUMN {name} {kind}")
     return db
 
 
@@ -115,10 +128,13 @@ def save_snapshot(path, analysis, ranked, config):
             run_id = db.execute("SELECT id FROM runs WHERE captured_at=? AND slug=?",
                                 (analysis["as_of"], analysis["slug"])).fetchone()[0]
         for row in analysis["ranking"]:
-            db.execute("""INSERT OR REPLACE INTO outcomes VALUES (?,?,?,?,?,?,?,?,?)""", (
+            db.execute("""INSERT OR REPLACE INTO outcomes
+                (run_id,outcome,weather_prob,market_prob,best_bid,best_ask,bid_size,ask_size,
+                 ask_levels_json,prediction_prob,market_weight) VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
                 run_id, row["outcome"], row["weather_prob"], row.get("market_prob"),
                 row.get("best_bid"), row.get("best_ask"), row.get("bid_size"), row.get("ask_size"),
-                json.dumps(row.get("ask_levels", []))))
+                json.dumps(row.get("ask_levels", [])), row.get("prediction_prob"),
+                row.get("market_weight")))
         for rank_no, item in enumerate(ranked, 1):
             db.execute("""INSERT OR REPLACE INTO candidates
                 (run_id,rank_no,outcomes_json,legs_json,model_probability,executable_cost,
@@ -130,6 +146,8 @@ def save_snapshot(path, analysis, ranked, config):
                 int(item["contains_model_mode"]), item["model_support_count"],
                 item["minimum_leg_price"], item["shares_per_outcome"],
                 int(item.get("contains_market_mode", False))))
+            db.execute("UPDATE candidates SET prediction_probability=?,market_weight=? WHERE run_id=? AND rank_no=?",
+                       (item.get("prediction_probability"), item.get("market_weight"), run_id, rank_no))
         return run_id
 
 
@@ -147,6 +165,18 @@ def record_paper_trade(path, run_id, analysis, item, bankroll, hours_to_close=No
             json.dumps(item["outcomes"], ensure_ascii=False),
             json.dumps(item["legs"], ensure_ascii=False), item["model_probability"], cost,
             item["net_edge"], shares, cost * shares, bankroll, hours_to_close, lead_bucket))
+        db.execute("UPDATE paper_trades SET prediction_probability=?,market_weight=? WHERE run_id=?",
+                   (item.get("prediction_probability"), item.get("market_weight"), run_id))
+
+
+def prior_market_probabilities(path, slug, before_iso):
+    """Return the most recent archived market distribution before a cutoff."""
+    with connect(path) as db:
+        row = db.execute("SELECT id,captured_at FROM runs WHERE slug=? AND captured_at<=? ORDER BY captured_at DESC LIMIT 1",
+                         (slug, before_iso)).fetchone()
+        if not row: return None
+        probabilities = dict(db.execute("SELECT outcome,market_prob FROM outcomes WHERE run_id=?", (row[0],)))
+        return {"captured_at": row[1], "probabilities": probabilities}
 
 
 def portfolio_state(path, starting_bankroll, current_slug):
