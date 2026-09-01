@@ -10,6 +10,7 @@ class MonitorTests(unittest.TestCase):
         meta=apply_market_fusion(analysis,"3h")
         self.assertAlmostEqual(sum(x["prediction_prob"] for x in analysis["ranking"]),1)
         self.assertGreater(meta["market_weight"],.5)
+        self.assertEqual(meta["base_weight"],.85)
     def test_current_day_max_conditions_distribution(self):
         analysis={"model_forecasts_c":{"a":29,"b":32},"ranking":[
             {"outcome":"29°C","weather_prob":.3},{"outcome":"30°C","weather_prob":.2},

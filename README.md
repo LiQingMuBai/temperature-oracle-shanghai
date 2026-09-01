@@ -67,6 +67,8 @@ Every layer may create one independent paper-trade sample. Tradable baskets may 
 
 An exploratory value channel also admits discounted adjacent baskets outside the market mode when fused probability is at least 20% and independent weather-model edge is at least 10%. It never admits negative-edge trades.
 
+The fused probability is market-led. Its base market weights are 60%/70%/80%/85% at the 24h/12h/6h/3h layers, then reduced automatically when spreads are wide or displayed depth is weak. Weather-only probability remains separate and is used to calculate value edge.
+
 For today's 6h and 3h layers, fresh ZSPD METAR observations condition the distribution on the maximum temperature already observed. Bins below the observed maximum become impossible. Observations older than two hours are recorded but never used for trading decisions.
 
 ## Capital and Execution Policy

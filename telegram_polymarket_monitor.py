@@ -94,7 +94,12 @@ def condition_on_observed_max(analysis, observed_max_c):
 def apply_market_fusion(analysis, lead_bucket, prior=None):
     """Market-informed prediction probability; independent weather probability stays unchanged for edge."""
     rows = analysis["ranking"]
-    base_weight = {"24h": .35, "12h": .50, "6h": .60, "3h": .70}[lead_bucket]
+    default_weights = {"24h": .60, "12h": .70, "6h": .80, "3h": .85}
+    base_weight = float(os.getenv(
+        f"POLYMARKET_{lead_bucket.upper()}_MARKET_WEIGHT",
+        default_weights[lead_bucket],
+    ))
+    base_weight = max(0.0, min(0.95, base_weight))
     weighted_spread = sum(float(r.get("market_prob", 0)) * float(r.get("spread", 1)) for r in rows)
     depth = sum(float(r.get("market_prob", 0)) * (float(r.get("bid_size", 0)) + float(r.get("ask_size", 0))) for r in rows)
     spread_quality = max(.2, min(1., 1 - weighted_spread / .20))
@@ -105,8 +110,8 @@ def apply_market_fusion(analysis, lead_bucket, prior=None):
     for row in rows:
         current = float(row.get("market_prob") or 0)
         old = prior_probs.get(row["outcome"])
-        # Half-strength two-hour extrapolation, bounded by non-negativity and later normalization.
-        trended[row["outcome"]] = max(1e-8, current + .5 * (current - float(old))) if old is not None else max(1e-8, current)
+        # Market-led short-term extrapolation, bounded by non-negativity and later normalization.
+        trended[row["outcome"]] = max(1e-8, current + .75 * (current - float(old))) if old is not None else max(1e-8, current)
     total_market = sum(trended.values())
     raw=[]
     for row in rows:
