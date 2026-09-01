@@ -163,7 +163,7 @@ def candidates(analysis, shares, threshold, min_probability=0.50, require_mode=F
     mode_gap = abs(temperature_key(mode_outcome) - temperature_key(market_mode_outcome))
     labels = [row["outcome"] for row in rows]
     found = []
-    for width in (2, 3, 4):
+    for width in (1, 2):
         for start in range(len(rows) - width + 1):
             basket = rows[start:start + width]
             fills = [fill_cost(row.get("ask_levels", []), shares) for row in basket]

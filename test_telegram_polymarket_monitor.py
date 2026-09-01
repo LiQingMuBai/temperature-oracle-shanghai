@@ -39,6 +39,19 @@ class MonitorTests(unittest.TestCase):
         message = format_alert({"contract_date":"2026-08-20","slug":"test"}, best)
         self.assertIn("下单前可用现金：$8.00", message)
 
+    def test_candidates_use_at_most_two_integer_bins(self):
+        analysis = {"model_forecasts_c": {"a": 30, "b": 31}, "ranking": [
+            {"outcome": "30°C", "weather_prob": .45, "market_prob": .4,
+             "prediction_prob": .45, "ask_levels": [{"price": .2, "size": 10}]},
+            {"outcome": "31°C", "weather_prob": .40, "market_prob": .4,
+             "prediction_prob": .40, "ask_levels": [{"price": .2, "size": 10}]},
+            {"outcome": "32°C", "weather_prob": .15, "market_prob": .2,
+             "prediction_prob": .15, "ask_levels": [{"price": .1, "size": 10}]},
+        ]}
+        ranked = candidates(analysis, 10, .01, min_probability=.20)
+        self.assertTrue(ranked)
+        self.assertTrue(all(1 <= len(item["outcomes"]) <= 2 for item in ranked))
+
 
 if __name__ == "__main__":
     unittest.main()

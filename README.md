@@ -63,7 +63,7 @@ The production monitor follows both today's and tomorrow's markets. Remaining ti
 
 Closer to settlement, the system requires higher absolute probability while allowing a smaller pricing edge. Results are measured independently for every layer.
 
-Every layer may create one independent paper-trade sample. Tradable baskets may contain two, three, or four adjacent bins and must include the market-probability mode.
+Every layer may create one independent paper-trade sample. A trade contains one integer-temperature bin or two adjacent bins.
 
 An exploratory value channel also admits discounted adjacent baskets outside the market mode when fused probability is at least 20% and independent weather-model edge is at least 10%. It never admits negative-edge trades.
 
