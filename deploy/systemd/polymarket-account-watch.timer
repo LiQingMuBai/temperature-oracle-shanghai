@@ -1,0 +1,11 @@
+[Unit]
+Description=Check watched Polymarket accounts every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+AccuracySec=1s
+Persistent=true
+Unit=polymarket-account-watch.service
+
+[Install]
+WantedBy=timers.target

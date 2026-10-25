@@ -4,6 +4,8 @@
 
 A quantitative decision system for Shanghai maximum-temperature prediction markets. It combines archived weather-model calibration, live multi-model forecasts, executable Polymarket order-book depth, layered risk filters, Telegram alerts, and point-in-time trade backtesting.
 
+The repository also includes a one-minute public-account watcher. It currently follows `@241532532432` and `@bilberry`, establishes a no-alert baseline on first launch, and sends only later BUY/SELL fills to Telegram.
+
 > Research software only. It does not place orders automatically, and forecast edge is not guaranteed profit.
 
 ## Strategy at a Glance
