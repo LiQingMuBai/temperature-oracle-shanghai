@@ -134,3 +134,45 @@ def dashboard_data(path, account="all", query="", limit=300):
         "accounts": accounts,
         "groups": groups,
     }
+
+
+def quant_market_context(path, group_limit=12, history_limit=90):
+    """Return recent real trade context used by the quant dashboard."""
+    db = connect(path, read_only=True)
+    latest = db.execute(
+        """SELECT account_name,wallet,token_id,condition_id,event_slug,market_slug,
+        title,outcome,price,timestamp FROM account_trades
+        WHERE token_id <> '' ORDER BY timestamp DESC LIMIT 1"""
+    ).fetchone()
+    if latest is None:
+        db.close()
+        return {"latest": None, "history": [], "groups": [], "accounts": []}
+
+    history = db.execute(
+        """SELECT timestamp,price,side,size,usdc_size FROM account_trades
+        WHERE token_id=? ORDER BY timestamp DESC LIMIT ?""",
+        (latest["token_id"], int(history_limit)),
+    ).fetchall()
+    groups = db.execute(
+        """SELECT account_name,token_id,title,outcome,MAX(event_slug) AS event_slug,
+        SUM(CASE WHEN side='BUY' THEN usdc_size ELSE 0 END) AS buy_usdc,
+        SUM(CASE WHEN side='SELL' THEN usdc_size ELSE 0 END) AS sell_usdc,
+        SUM(CASE WHEN side='BUY' THEN size ELSE 0 END) AS buy_size,
+        SUM(CASE WHEN side='SELL' THEN size ELSE 0 END) AS sell_size,
+        COUNT(*) AS trade_count,MAX(timestamp) AS last_timestamp,
+        SUM(usdc_size)/NULLIF(SUM(size),0) AS avg_price
+        FROM account_trades GROUP BY account_name,token_id,title,outcome
+        ORDER BY last_timestamp DESC LIMIT ?""",
+        (int(group_limit),),
+    ).fetchall()
+    accounts = [dict(row) for row in db.execute(
+        """SELECT account_name,MAX(wallet) AS wallet,COUNT(*) AS trades,MAX(timestamp) AS last_seen
+        FROM account_trades GROUP BY account_name ORDER BY account_name"""
+    )]
+    db.close()
+    return {
+        "latest": dict(latest),
+        "history": [dict(row) for row in reversed(history)],
+        "groups": [dict(row) for row in groups],
+        "accounts": accounts,
+    }

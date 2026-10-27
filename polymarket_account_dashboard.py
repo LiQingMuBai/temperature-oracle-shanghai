@@ -2,15 +2,127 @@
 """Responsive web dashboard for aggregated watched-account trades."""
 
 import argparse
+from collections import deque
 import json
+import math
+import mimetypes
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
+from urllib.request import Request, urlopen
 
-from polymarket_account_db import dashboard_data
+from polymarket_account_db import dashboard_data, quant_market_context
 
 
 ROOT = Path(__file__).resolve().parent
+DIST = ROOT / "dist"
+
+
+def fetch_json(url, timeout=8):
+    request = Request(url, headers={"User-Agent": "ShanghaiQuantDashboard/1.0"})
+    with urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def clamp(value, low=0.001, high=0.999):
+    return max(low, min(high, float(value)))
+
+
+def probability_from_book(book, fallback):
+    bids = book.get("bids") or []
+    asks = book.get("asks") or []
+    best_bid = max((float(row["price"]) for row in bids), default=None)
+    best_ask = min((float(row["price"]) for row in asks), default=None)
+    if best_bid is not None and best_ask is not None:
+        return clamp((best_bid + best_ask) / 2)
+    return clamp(best_bid if best_bid is not None else (best_ask if best_ask is not None else fallback))
+
+
+def depth_points(book):
+    points = []
+    bid_total = 0.0
+    for row in sorted(book.get("bids") or [], key=lambda item: float(item["price"]), reverse=True)[:14]:
+        price, size = float(row["price"]), float(row["size"])
+        bid_total += price * size
+        points.append({"price": round(price, 4), "bid": round(bid_total, 2), "ask": 0})
+    ask_total = 0.0
+    for row in sorted(book.get("asks") or [], key=lambda item: float(item["price"]))[:14]:
+        price, size = float(row["price"]), float(row["size"])
+        ask_total += price * size
+        points.append({"price": round(price, 4), "bid": 0, "ask": round(ask_total, 2)})
+    return sorted(points, key=lambda item: item["price"])
+
+
+def build_quant_payload(db_path, probability_state):
+    context = quant_market_context(db_path)
+    latest = context["latest"]
+    if latest is None:
+        raise RuntimeError("No watched-account trades are available yet")
+
+    if probability_state["token"] != latest["token_id"]:
+        probability_state["token"] = latest["token_id"]
+        probability_state["points"].clear()
+    probability_history = probability_state["points"]
+    fallback = float(latest.get("price") or 0.5)
+    try:
+        book = fetch_json(f"https://clob.polymarket.com/book?token_id={latest['token_id']}")
+    except Exception:
+        book = {"bids": [], "asks": []}
+    outcome_price = probability_from_book(book, fallback)
+    yes_price = 1 - outcome_price if str(latest.get("outcome", "")).lower() == "no" else outcome_price
+    now = int(time.time())
+    if not probability_history:
+        for row in context["history"][-35:]:
+            value = float(row.get("price") or fallback)
+            yes = 1 - value if str(latest.get("outcome", "")).lower() == "no" else value
+            probability_history.append({"timestamp": int(row["timestamp"]), "yes": round(yes * 100, 2), "no": round((1 - yes) * 100, 2)})
+    probability_history.append({"timestamp": now, "yes": round(yes_price * 100, 2), "no": round((1 - yes_price) * 100, 2)})
+
+    pnl = exposure = 0.0
+    for account in context["accounts"]:
+        try:
+            positions = fetch_json(f"https://data-api.polymarket.com/positions?user={account['wallet']}&limit=500")
+            pnl += sum(float(position.get("cashPnl") or 0) for position in positions)
+            exposure += sum(float(position.get("currentValue") or 0) for position in positions)
+        except Exception:
+            continue
+
+    gas_fee = None
+    try:
+        gas = fetch_json("https://gasstation.polygon.technology/v2")
+        max_fee = float((gas.get("standard") or {}).get("maxFee") or 0)
+        gas_fee = round(max_fee * 200000 / 1_000_000_000, 6)
+    except Exception:
+        pass
+
+    arbitrage = []
+    for index, group in enumerate(context["groups"]):
+        poly_price = clamp(group.get("avg_price") or fallback)
+        buy_size = float(group.get("buy_size") or 0)
+        sell_size = float(group.get("sell_size") or 0)
+        imbalance = (buy_size - sell_size) / max(buy_size + sell_size, 1)
+        reference = clamp(poly_price + math.tanh(imbalance) * 0.035)
+        premium = reference - poly_price
+        signal = "BUY_POLY" if premium >= 0.02 else ("SELL_POLY" if premium <= -0.02 else "WATCH")
+        arbitrage.append({
+            "id": f"{group['token_id']}:{group['account_name']}:{index}",
+            "market": group["title"], "outcome": group["outcome"],
+            "polymarket": round(poly_price, 4), "reference": round(reference, 4),
+            "premium": round(premium, 4),
+            "volume": round(float(group.get("buy_usdc") or 0) + float(group.get("sell_usdc") or 0), 2),
+            "signal": signal, "source": "MODEL_REFERENCE", "updatedAt": int(group["last_timestamp"]),
+        })
+
+    return {
+        "generatedAt": now,
+        "selectedEvent": {"title": latest["title"], "outcome": latest["outcome"], "eventSlug": latest["event_slug"]},
+        "metrics": {"pnl": round(pnl, 2), "exposure": round(exposure, 2),
+                    "activeArbitrage": sum(abs(row["premium"]) >= 0.02 for row in arbitrage), "gasFeePol": gas_fee},
+        "probability": list(probability_history), "depth": depth_points(book), "arbitrage": arbitrage,
+        "trackedAccounts": [row["account_name"] for row in context["accounts"]], "dataMode": "LIVE_WITH_MODEL_REFERENCE",
+    }
 
 HTML = r'''<!doctype html>
 <html lang="zh-CN">
@@ -51,6 +163,10 @@ $('account').addEventListener('change',load);let timer;$('search').addEventListe
 
 class Handler(BaseHTTPRequestHandler):
     db_path = None
+    quant_cache = None
+    quant_cache_time = 0.0
+    quant_lock = threading.Lock()
+    probability_state = {"token": None, "points": deque(maxlen=180)}
 
     def send_bytes(self, status, content_type, body):
         self.send_response(status)
@@ -64,7 +180,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         if parsed.path == "/":
-            return self.send_bytes(200, "text/html; charset=utf-8", HTML.encode())
+            index = DIST / "index.html"
+            return self.send_bytes(200, "text/html; charset=utf-8", index.read_bytes() if index.exists() else HTML.encode())
         if parsed.path == "/healthz":
             return self.send_bytes(200, "text/plain; charset=utf-8", b"ok\n")
         if parsed.path == "/api/data":
@@ -78,6 +195,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode()
                 return self.send_bytes(500, "application/json; charset=utf-8", body)
+        if parsed.path == "/api/quant":
+            try:
+                with self.quant_lock:
+                    if self.quant_cache is None or time.monotonic() - self.quant_cache_time >= 2:
+                        self.__class__.quant_cache = build_quant_payload(self.db_path, self.probability_state)
+                        self.__class__.quant_cache_time = time.monotonic()
+                    payload = self.quant_cache
+                return self.send_bytes(200, "application/json; charset=utf-8", json.dumps(payload, ensure_ascii=False).encode())
+            except Exception as exc:
+                body = json.dumps({"error": str(exc)}, ensure_ascii=False).encode()
+                return self.send_bytes(500, "application/json; charset=utf-8", body)
+        if parsed.path.startswith("/assets/") and DIST.exists():
+            relative = parsed.path.lstrip("/")
+            target = (DIST / relative).resolve()
+            if DIST.resolve() in target.parents and target.is_file():
+                content_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+                return self.send_bytes(200, content_type, target.read_bytes())
         self.send_bytes(404, "text/plain; charset=utf-8", b"not found\n")
 
     def log_message(self, fmt, *args):
