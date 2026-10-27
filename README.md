@@ -6,6 +6,8 @@ A quantitative decision system for Shanghai maximum-temperature prediction marke
 
 The repository also includes a one-minute public-account watcher. It currently follows `@241532532432` and `@bilberry`, establishes a no-alert baseline on first launch, and sends only later BUY/SELL fills to Telegram.
 
+Its live web dashboard aggregates repeated fills by account and outcome token. Cumulative buys of at least $100 are green, $50–$99.99 are orange, and smaller positions are blue; sells, net shares, average buy price, repetition count, filters, and direct market links remain visible.
+
 > Research software only. It does not place orders automatically, and forecast edge is not guaranteed profit.
 
 ## Strategy at a Glance

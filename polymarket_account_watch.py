@@ -12,6 +12,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from zoneinfo import ZoneInfo
+from polymarket_account_db import record_trades
 
 
 ROOT = Path(__file__).resolve().parent
@@ -161,6 +162,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--env-file", type=Path, default=ROOT / "work" / "telegram.env")
     parser.add_argument("--state-file", type=Path, default=ROOT / "work" / "polymarket_account_watch_state.json")
+    parser.add_argument("--db", type=Path, default=ROOT / "work" / "polymarket_account_watch.sqlite3")
+    parser.add_argument("--backfill-db", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     load_env(args.env_file)
@@ -189,6 +192,14 @@ def main():
 
     state = json.loads(args.state_file.read_text(encoding="utf-8"))
     started_at = int(state.get("started_at") or now)
+    if args.backfill_db:
+        results = []
+        for name, wallet in accounts.items():
+            trades = fetch_trades(wallet, started_at, max_pages=200)
+            inserted = record_trades(args.db, name, wallet, trades, trade_key)
+            results.append({"account": name, "fetched": len(trades), "inserted": inserted})
+        print(json.dumps({"status": "backfilled", "accounts": results}, ensure_ascii=False))
+        return
     summaries = []
     for name, wallet in accounts.items():
         saved = state.setdefault("accounts", {}).setdefault(name, {
@@ -202,6 +213,7 @@ def main():
         if args.dry_run:
             summaries.append({"account": name, "new_trades": len(fresh)})
             continue
+        inserted = record_trades(args.db, name, wallet, fresh, trade_key)
         for message in format_messages(name, fresh):
             send_telegram(token, chat_id, message)
         seen = list(saved.get("seen", [])) + [trade_key(item) for item in fresh]
@@ -213,7 +225,7 @@ def main():
             )
         saved["last_checked_at"] = now
         atomic_write(args.state_file, state)
-        summaries.append({"account": name, "new_trades": len(fresh)})
+        summaries.append({"account": name, "new_trades": len(fresh), "stored": inserted})
     print(json.dumps({"status": "ok", "checked_at": now, "accounts": summaries}, ensure_ascii=False))
 
 
